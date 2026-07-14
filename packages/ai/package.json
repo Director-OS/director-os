@@ -11,6 +11,9 @@
       "import": "./dist/index.js"
     }
   },
+  "dependencies": {
+    "@director-os/shared": "0.1.0"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

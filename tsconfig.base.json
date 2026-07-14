@@ -3,6 +3,15 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "baseUrl": ".",
+    "paths": {
+      "@director-os/ai": ["packages/ai/src/index.ts"],
+      "@director-os/auth": ["packages/auth/src/index.ts"],
+      "@director-os/database": ["packages/database/src/index.ts"],
+      "@director-os/integrations": ["packages/integrations/src/index.ts"],
+      "@director-os/shared": ["packages/shared/src/index.ts"],
+      "@director-os/ui": ["packages/ui/src/index.ts"]
+    },
     "lib": ["ES2022"],
     "strict": true,
     "noUncheckedIndexedAccess": true,

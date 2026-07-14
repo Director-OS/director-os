@@ -6,5 +6,9 @@
     "outDir": "dist",
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
+  "references": [
+    { "path": "../../packages/shared" },
+    { "path": "../../packages/ui" }
+  ],
   "include": ["src/**/*.ts"]
 }
