@@ -16,6 +16,8 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
+    "start:api": "npm run --workspace @director-os/api start",
+    "start:web": "npm run --workspace @director-os/web start",
     "clean": "npm run --workspaces --if-present clean && rm -rf .cache"
   },
   "devDependencies": {
