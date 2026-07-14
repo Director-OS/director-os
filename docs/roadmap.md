@@ -1,31 +1,41 @@
 # Director OS Roadmap
 
-## Phase 1: Foundation
+## Current Status
 
-- Establish repository structure and package boundaries.
-- Define architecture and coding standards.
-- Set up baseline developer workflow and CI checks.
+- Monorepo foundation is live with npm workspaces, TypeScript project references, linting, tests, and CI.
+- Director Intake web vertical slice is live with folder intake, media classification, scoring, sequencing, and report export.
+- Director Vision Engine v1 is live with structured scene, quality, marketing, and problem analysis.
 
-## Phase 2: Core Platform
+## Milestone Alpha: Listing Intelligence
 
-- Implement authentication and role-based access controls.
-- Stand up database layer with migrations and seed workflows.
-- Build shared service patterns and error handling.
+### Completed
 
-## Phase 3: Product Experience
+- Browser-side intake processing for unnamed listing folders.
+- Duplicate and similarity detection for uploaded photos.
+- Structured photo analysis cards with confidence-based recommendations.
+- Executive Summary block with strengths, weaknesses, missing shots, hero recommendation, and MLS readiness.
 
-- Develop core application surfaces in `apps/`.
-- Introduce reusable component library in `packages/ui`.
-- Add observability dashboards and operational tooling.
+### In Progress
 
-## Phase 4: Intelligence and Integrations
+- Improve model robustness with stronger real-world fixture coverage.
+- Expand scene and defect precision for ambiguous image sets.
+- Tighten recommendation calibration for keep/edit/retake/remove thresholds.
 
-- Deliver AI decision-support modules in `packages/ai`.
-- Integrate external tools through `packages/integrations`.
-- Establish quality gates for AI-assisted workflows.
+### Next
+
+- Add persisted analysis sessions and comparison history.
+- Add agent-facing QA checklist outputs for listing coordinators.
+- Introduce connector-ready output contracts for CRM/MLS integrations.
+
+## Milestone Beta: Operational Intelligence
+
+- Role-aware workflows for intake, review, and approval handoffs.
+- Authenticated project workspaces and saved portfolio views.
+- Observability and usage analytics for production tuning.
 
 ## Success Metrics
 
-- Deployment reliability and incident reduction.
-- Faster cycle time from idea to release.
-- Improved decision quality for real estate teams.
+- Intake-to-launch time reduction.
+- Increase in high-appeal hero image selection rate.
+- Reduction in avoidable media defects at publish time.
+- Improved downstream listing engagement and click-through quality.
