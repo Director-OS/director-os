@@ -1,0 +1,13 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/shared" },
+    { "path": "./packages/auth" },
+    { "path": "./packages/database" },
+    { "path": "./packages/integrations" },
+    { "path": "./packages/ai" },
+    { "path": "./packages/ui" },
+    { "path": "./apps/api" },
+    { "path": "./apps/web" }
+  ]
+}
