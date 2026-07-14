@@ -1,3 +1,11 @@
+import {
+  runDirectorVisionEngineV1,
+  SCENE_TAGS,
+  type Recommendation,
+  type SceneTag as VisionSceneTag,
+  type VisionAnalysis
+} from "./vision-engine.js";
+
 export interface FileDescriptor {
   name: string;
   path?: string;
@@ -13,7 +21,7 @@ export interface MediaCounts {
   other: number;
 }
 
-export type SceneTag = "exterior" | "backyard" | "kitchen" | "primary-bedroom" | "bathroom" | "interior" | "unknown";
+export type SceneTag = VisionSceneTag;
 
 export type DecisionTag = "recommended" | "needs-work" | "remove";
 
@@ -47,6 +55,14 @@ export interface PhotoScores {
   usableAspect: number;
 }
 
+export interface ExecutiveSummary {
+  strengths: string[];
+  weaknesses: string[];
+  missingShots: string[];
+  heroImageRecommendation: string;
+  estimatedMlsReadiness: string;
+}
+
 export interface PhotoAssessment extends PhotoMetrics {
   sceneTag: SceneTag;
   scores: PhotoScores;
@@ -60,6 +76,8 @@ export interface PhotoAssessment extends PhotoMetrics {
   duplicateOfPath: string | null;
   recommendedMlsOrder: number;
   heroScore: number;
+  vision: VisionAnalysis;
+  primaryRecommendation: Recommendation;
 }
 
 export interface DirectorReview {
@@ -70,6 +88,7 @@ export interface DirectorReview {
   actionItems: string[];
   launchReadinessScore: number;
   launchReadinessLabel: "Not Ready" | "Needs Work" | "Almost Ready" | "Launch Ready";
+  executiveSummary: ExecutiveSummary;
 }
 
 export interface IntakeSummary {
@@ -175,36 +194,6 @@ function histogramDistance(histA: number[], histB: number[]): number {
   return distance / length;
 }
 
-function inferSceneFromPixels(photo: PhotoMetrics): SceneTag {
-  const landscape = photo.width > photo.height;
-
-  if (photo.greenRatio > 0.37 && landscape) {
-    return "backyard";
-  }
-
-  if ((photo.blueRatio > 0.26 || photo.greenRatio > 0.24) && photo.brightness > 0.5 && landscape) {
-    return "exterior";
-  }
-
-  if (photo.warmRatio > 0.34 && photo.edgeDensity > 0.12 && photo.brightness > 0.42) {
-    return "kitchen";
-  }
-
-  if (photo.saturation < 0.2 && photo.brightness > 0.52 && photo.contrast > 0.08) {
-    return "bathroom";
-  }
-
-  if (photo.darkPixelRatio > 0.22 && photo.edgeDensity < 0.11 && photo.brightness < 0.5) {
-    return "primary-bedroom";
-  }
-
-  if (photo.edgeDensity > 0.08) {
-    return "interior";
-  }
-
-  return "unknown";
-}
-
 function scoreAspectRatio(width: number, height: number): number {
   if (height === 0) {
     return 0;
@@ -247,18 +236,6 @@ function scorePhoto(photo: PhotoMetrics): PhotoScores {
     orientation: scoreOrientation(photo.width, photo.height),
     usableAspect: scoreAspectRatio(photo.width, photo.height)
   };
-}
-
-function totalScore(scores: PhotoScores): number {
-  return Math.round(
-    scores.sharpness * 0.24 +
-      scores.exposure * 0.16 +
-      scores.brightness * 0.14 +
-      scores.contrast * 0.1 +
-      scores.resolution * 0.2 +
-      scores.orientation * 0.06 +
-      scores.usableAspect * 0.1
-  );
 }
 
 function buildIssueFlags(scores: PhotoScores, photo: PhotoMetrics): string[] {
@@ -304,25 +281,23 @@ function buildScoreReasons(scores: PhotoScores, issues: string[]): string[] {
   return reasons;
 }
 
-function decidePhoto(scores: PhotoScores, issues: string[]): DecisionTag {
-  if (issues.includes("low resolution") || issues.includes("blurry") || issues.includes("overexposed")) {
-    if (scores.resolution < 35 || scores.sharpness < 35) {
-      return "remove";
-    }
-  }
+function bestRecommendation(analysis: VisionAnalysis): Recommendation {
+  const ordered = [...analysis.recommendations].sort((a, b) => b.confidence - a.confidence);
+  return ordered[0] ?? { action: "keep", confidence: 0.5, reason: "Default keep decision." };
+}
 
-  if (issues.length >= 2 || scores.sharpness < 50 || scores.exposure < 50) {
+function decisionFromRecommendation(recommendation: Recommendation): DecisionTag {
+  if (recommendation.action === "remove") {
+    return "remove";
+  }
+  if (recommendation.action === "retake" || recommendation.action === "edit" || recommendation.action === "move-later") {
     return "needs-work";
   }
-
   return "recommended";
 }
 
-const SCENE_PRIORITY: SceneTag[] = ["exterior", "kitchen", "interior", "primary-bedroom", "bathroom", "backyard", "unknown"];
-
 function compareForMlsOrder(a: PhotoAssessment, b: PhotoAssessment): number {
-  const aPriority = SCENE_PRIORITY.indexOf(a.sceneTag);
-  const bPriority = SCENE_PRIORITY.indexOf(b.sceneTag);
+  const scenePriority = new Map<SceneTag, number>(SCENE_TAGS.map((tag, index) => [tag, index]));
 
   const decisionWeight = (value: DecisionTag) => {
     if (value === "recommended") {
@@ -338,6 +313,8 @@ function compareForMlsOrder(a: PhotoAssessment, b: PhotoAssessment): number {
     return decisionWeight(a.decision) - decisionWeight(b.decision);
   }
 
+  const aPriority = scenePriority.get(a.sceneTag) ?? 99;
+  const bPriority = scenePriority.get(b.sceneTag) ?? 99;
   if (aPriority !== bPriority) {
     return aPriority - bPriority;
   }
@@ -403,24 +380,43 @@ export function assessPhotos(metrics: PhotoMetrics[]): PhotoAssessment[] {
   const initial: PhotoAssessment[] = metrics.map((photo) => {
     const scores = scorePhoto(photo);
     const issues = buildIssueFlags(scores, photo);
-    const sceneTag = inferSceneFromPixels(photo);
-    const decision = decidePhoto(scores, issues);
-    const heroScore = totalScore(scores);
+    const vision = runDirectorVisionEngineV1({
+      fileName: photo.fileName,
+      width: photo.width,
+      height: photo.height,
+      brightness: photo.brightness,
+      contrast: photo.contrast,
+      saturation: photo.saturation,
+      sharpness: photo.sharpness,
+      edgeDensity: photo.edgeDensity,
+      blueRatio: photo.blueRatio,
+      greenRatio: photo.greenRatio,
+      warmRatio: photo.warmRatio,
+      brightPixelRatio: photo.brightPixelRatio,
+      darkPixelRatio: photo.darkPixelRatio
+    });
+
+    const primaryRecommendation = bestRecommendation(vision);
+    const decision = decisionFromRecommendation(primaryRecommendation);
 
     const assessment: PhotoAssessment = {
       ...photo,
-      sceneTag,
+      sceneTag: vision.scene.label,
       scores,
-      totalScore: heroScore,
-      heroScore,
+      totalScore: vision.marketing.heroImageScore,
+      heroScore: vision.marketing.heroImageScore,
       issues,
       scoreReasons: buildScoreReasons(scores, issues),
-      recommendationReasons: [],
+      recommendationReasons: vision.recommendations.map(
+        (item) => `${item.action} (${Math.round(item.confidence * 100)}%): ${item.reason}`
+      ),
       decision,
       duplicateGroupId: null,
       similarGroupId: null,
       duplicateOfPath: null,
-      recommendedMlsOrder: 0
+      recommendedMlsOrder: 0,
+      vision,
+      primaryRecommendation
     };
 
     return assessment;
@@ -446,6 +442,7 @@ export function assessPhotos(metrics: PhotoMetrics[]): PhotoAssessment[] {
         item.decision = "remove";
         item.duplicateOfPath = anchor?.filePath ?? null;
         item.issues = [...item.issues, "redundant"];
+        item.recommendationReasons.unshift(`remove (97%): probable duplicate of ${item.duplicateOfPath ?? "higher-ranked frame"}.`);
       }
     });
   });
@@ -462,22 +459,6 @@ export function assessPhotos(metrics: PhotoMetrics[]): PhotoAssessment[] {
   const ordered = [...initial].sort(compareForMlsOrder);
   ordered.forEach((item, index) => {
     item.recommendedMlsOrder = index + 1;
-
-    const sceneReason = item.sceneTag === "unknown" ? "general support shot" : `${item.sceneTag.replace("-", " ")} coverage`;
-    if (item.decision === "remove") {
-      if (item.duplicateOfPath) {
-        item.recommendationReasons = [`Remove as probable duplicate of ${item.duplicateOfPath}.`];
-      } else {
-        item.recommendationReasons = ["Remove due to low quality risk in hero and gallery contexts."];
-      }
-    } else if (item.decision === "needs-work") {
-      item.recommendationReasons = [
-        `Keep later in sequence for ${sceneReason}.`,
-        "Adjust exposure and sharpness in post before launch."
-      ];
-    } else {
-      item.recommendationReasons = [`Place early for ${sceneReason}.`, "Strong technical candidate for MLS sequencing."];
-    }
   });
 
   return ordered;
@@ -495,14 +476,17 @@ function createMissingShotChecklist(summary: IntakeSummary): string[] {
   const checklist: string[] = [];
   const observed = new Set(summary.photos.map((candidate) => candidate.sceneTag));
 
-  if (!observed.has("exterior")) {
-    checklist.push("Capture a bright curb-appeal exterior hero shot from street level.");
+  if (!observed.has("exterior-front")) {
+    checklist.push("Capture a bright curb-appeal exterior front hero shot from street level.");
   }
-  if (!observed.has("backyard")) {
-    checklist.push("Add at least one backyard or patio lifestyle composition.");
+  if (!observed.has("exterior-rear") && !observed.has("patio-deck") && !observed.has("pool")) {
+    checklist.push("Add at least one rear-yard, patio, or pool lifestyle composition.");
   }
   if (!observed.has("kitchen")) {
     checklist.push("Shoot a wide kitchen frame including counters and island if present.");
+  }
+  if (!observed.has("living-room") && !observed.has("family-room")) {
+    checklist.push("Include at least one primary living area shot for flow and scale.");
   }
   if (!observed.has("primary-bedroom")) {
     checklist.push("Include a primary bedroom shot that shows depth and natural light.");
@@ -526,6 +510,52 @@ function topHeroCandidates(photos: PhotoAssessment[]): PhotoAssessment[] {
     .filter((item) => item.decision !== "remove")
     .sort((a, b) => b.heroScore - a.heroScore)
     .slice(0, 5);
+}
+
+function buildExecutiveSummary(summary: IntakeSummary): ExecutiveSummary {
+  const photos = summary.photos;
+  const strengths: string[] = [];
+  const weaknesses: string[] = [];
+
+  const avgHero =
+    photos.length > 0 ? Math.round(photos.reduce((total, photo) => total + photo.vision.marketing.heroImageScore, 0) / photos.length) : 0;
+  const highAppeal = photos.filter((photo) => photo.vision.marketing.clickLikelihood >= 75).length;
+  const issueHeavy = photos.filter((photo) => photo.vision.problems.some((problem) => problem.detected)).length;
+
+  if (avgHero >= 70) {
+    strengths.push(`Strong overall hero potential with average score ${avgHero}/100.`);
+  }
+  if (highAppeal > 0) {
+    strengths.push(`${highAppeal} images show high click-through potential.`);
+  }
+
+  if (issueHeavy > 0) {
+    weaknesses.push(`${issueHeavy} images contain detected staging or technical problems.`);
+  }
+  const needsWork = photos.filter((photo) => photo.decision === "needs-work").length;
+  if (needsWork > 0) {
+    weaknesses.push(`${needsWork} images should be retouched or retaken before launch.`);
+  }
+
+  if (strengths.length === 0) {
+    strengths.push("Initial coverage is present, but hero quality needs improvement.");
+  }
+  if (weaknesses.length === 0) {
+    weaknesses.push("No major visual blockers detected.");
+  }
+
+  const heroCandidate = topHeroCandidates(photos)[0];
+  const missingShots = createMissingShotChecklist(summary);
+
+  return {
+    strengths,
+    weaknesses,
+    missingShots,
+    heroImageRecommendation: heroCandidate
+      ? `${heroCandidate.fileName} (${heroCandidate.sceneTag}) is the best hero candidate at ${heroCandidate.heroScore}/100.`
+      : "No viable hero image detected yet.",
+    estimatedMlsReadiness: avgHero >= 80 ? "High" : avgHero >= 65 ? "Medium" : "Low"
+  };
 }
 
 export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
@@ -556,7 +586,7 @@ export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
     topThree.length > 0 ? Math.round(topThree.reduce((total, item) => total + item.heroScore, 0) / topThree.length) : 0;
 
   const launchReadinessScore = Math.round(
-    photoDepthScore * 0.3 + videoScore * 0.18 + pdfScore * 0.14 + docsScore * 0.1 + heroDepth * 0.28
+    photoDepthScore * 0.26 + videoScore * 0.16 + pdfScore * 0.12 + docsScore * 0.1 + heroDepth * 0.36
   );
 
   const launchReadinessLabel: DirectorReview["launchReadinessLabel"] =
@@ -577,7 +607,7 @@ export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
 
   const topHero = heroCandidates[0];
   const storyAngle = topHero
-    ? `Lead with ${summary.address} using ${topHero.sceneTag.replace("-", " ")} imagery and technical clarity to build instant confidence.`
+    ? `Lead with ${summary.address} using ${topHero.sceneTag.replace(/-/g, " ")} imagery and technical clarity to build instant confidence.`
     : `Position ${summary.address} as a practical, move-in ready opportunity with clear lifestyle benefits.`;
 
   const actionItems: string[] = [];
@@ -604,7 +634,8 @@ export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
     missingShotChecklist: createMissingShotChecklist(summary),
     actionItems,
     launchReadinessScore,
-    launchReadinessLabel
+    launchReadinessLabel,
+    executiveSummary: buildExecutiveSummary(summary)
   };
 }
 
@@ -630,6 +661,17 @@ export function createTextReport(summary: IntakeSummary, review: DirectorReview)
     "Launch Readiness",
     "----------------",
     `Score: ${review.launchReadinessScore}/100 (${review.launchReadinessLabel})`,
+    "",
+    "Executive Summary",
+    "-----------------",
+    "Strengths:",
+    ...review.executiveSummary.strengths.map((item, index) => `${index + 1}. ${item}`),
+    "Weaknesses:",
+    ...review.executiveSummary.weaknesses.map((item, index) => `${index + 1}. ${item}`),
+    "Missing shots:",
+    ...review.executiveSummary.missingShots.map((item, index) => `${index + 1}. ${item}`),
+    `Hero recommendation: ${review.executiveSummary.heroImageRecommendation}`,
+    `Estimated MLS readiness: ${review.executiveSummary.estimatedMlsReadiness}`,
     "",
     "Director Review",
     "---------------",

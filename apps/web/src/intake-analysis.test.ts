@@ -100,7 +100,7 @@ describe("intake analysis", () => {
       }
     ]);
 
-    expect(assessed[0]?.sceneTag).toBe("exterior");
+    expect(assessed[0]?.sceneTag).toBe("exterior-front");
   });
 
   it("builds review and text report with sequencing", () => {
@@ -146,6 +146,7 @@ describe("intake analysis", () => {
 
     expect(review.missingShotChecklist.length).toBeGreaterThan(0);
     expect(report).toContain("Recommended MLS Order");
+    expect(report).toContain("Executive Summary");
     expect(report).toContain("IMG_1001.JPG");
   });
 });
