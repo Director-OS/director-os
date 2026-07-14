@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Director OS — Listing Intake</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <p class="eyebrow">DIRECTOR OS</p>
+        <h1>Listing Intake</h1>
+        <p class="sub">Drop an unnamed listing folder. Director audits the media and builds a review.</p>
+      </div>
+      <span class="version">v0.1</span>
+    </header>
+
+    <section class="card intake">
+      <label class="dropzone" id="dropzone">
+        <input id="folderInput" type="file" webkitdirectory multiple />
+        <strong>Select listing folder</strong>
+        <span>No renaming or sorting required</span>
+      </label>
+      <div class="fields">
+        <label>Property address<input id="address" value="3004 Blackhawk Road, Dayton, OH 45420" /></label>
+        <label>List price<input id="price" value="$200,000" /></label>
+      </div>
+      <button id="analyzeBtn" disabled>Analyze listing</button>
+    </section>
+
+    <section id="progressCard" class="card hidden">
+      <h2>Analyzing media…</h2>
+      <div class="progress"><div id="progressBar"></div></div>
+      <p id="progressText">Preparing files</p>
+    </section>
+
+    <section id="results" class="hidden">
+      <div class="score-grid">
+        <article class="card score-card"><span>Launch readiness</span><strong id="launchScore">—</strong><small id="launchLabel">—</small></article>
+        <article class="card score-card"><span>Photos</span><strong id="photoCount">0</strong><small id="photoStatus">—</small></article>
+        <article class="card score-card"><span>Videos</span><strong id="videoCount">0</strong><small id="videoStatus">—</small></article>
+        <article class="card score-card"><span>Other files</span><strong id="otherCount">0</strong><small>Floor plans & documents</small></article>
+      </div>
+
+      <div class="two-col">
+        <article class="card">
+          <h2>Director Review</h2>
+          <dl>
+            <div><dt>Recommended story</dt><dd id="story">—</dd></div>
+            <div><dt>Primary angle</dt><dd id="angle">—</dd></div>
+            <div><dt>Recommended runtime</dt><dd id="runtime">—</dd></div>
+          </dl>
+        </article>
+        <article class="card">
+          <h2>Action items</h2>
+          <ul id="actions"></ul>
+        </article>
+      </div>
+
+      <article class="card">
+        <div class="section-head"><div><h2>Photo QA & hero ranking</h2><p>Technical scoring only; originals are never changed.</p></div><button id="downloadBtn" class="secondary">Download report</button></div>
+        <div id="photoTable" class="photo-table"></div>
+      </article>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
