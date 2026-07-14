@@ -56,6 +56,14 @@ npm test
 npm run build
 ```
 
+### Run Director Intake MVP
+
+```bash
+npm run mvp
+```
+
+Then open `http://127.0.0.1:4173` in your browser.
+
 ### Bootstrap
 
 ```bash

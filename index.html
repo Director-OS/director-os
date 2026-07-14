@@ -41,7 +41,9 @@
         <article class="card score-card"><span>Launch readiness</span><strong id="launchScore">—</strong><small id="launchLabel">—</small></article>
         <article class="card score-card"><span>Photos</span><strong id="photoCount">0</strong><small id="photoStatus">—</small></article>
         <article class="card score-card"><span>Videos</span><strong id="videoCount">0</strong><small id="videoStatus">—</small></article>
-        <article class="card score-card"><span>Other files</span><strong id="otherCount">0</strong><small>Floor plans & documents</small></article>
+        <article class="card score-card"><span>PDFs</span><strong id="pdfCount">0</strong><small>Brochures and one-pagers</small></article>
+        <article class="card score-card"><span>Documents</span><strong id="documentCount">0</strong><small>Disclosures and notes</small></article>
+        <article class="card score-card"><span>Other files</span><strong id="otherCount">0</strong><small>Unclassified uploads</small></article>
       </div>
 
       <div class="two-col">
@@ -54,17 +56,19 @@
           </dl>
         </article>
         <article class="card">
+          <h2>Missing media</h2>
+          <ul id="missingMedia"></ul>
           <h2>Action items</h2>
           <ul id="actions"></ul>
         </article>
       </div>
 
       <article class="card">
-        <div class="section-head"><div><h2>Photo QA & hero ranking</h2><p>Technical scoring only; originals are never changed.</p></div><button id="downloadBtn" class="secondary">Download report</button></div>
+        <div class="section-head"><div><h2>Photo QA & hero ranking</h2><p>Technical scoring only; originals are never changed.</p></div><div class="button-row"><button id="downloadTextBtn" class="secondary">Download text report</button><button id="downloadJsonBtn" class="secondary">Download JSON report</button></div></div>
         <div id="photoTable" class="photo-table"></div>
       </article>
     </section>
   </main>
-  <script src="app.js"></script>
+  <script type="module" src="apps/web/dist/main.js"></script>
 </body>
 </html>
