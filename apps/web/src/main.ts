@@ -1,26 +1,39 @@
 import {
+  assessPhotos,
   buildDirectorReview,
   classifyMedia,
   createTextReport,
   isImageDescriptor,
-  rankHeroCandidates,
+  type DecisionTag,
   type FileDescriptor,
-  type HeroCandidate,
   type IntakeSummary,
+  type PhotoAssessment,
   type PhotoMetrics,
   type SceneTag
 } from "./intake-analysis.js";
 
+type FilterTag = "all" | "recommended" | "needs-work" | "remove";
+
+interface PhotoOverride {
+  sceneTag?: SceneTag;
+  decision?: DecisionTag;
+  rank?: number;
+}
+
 interface AppState {
   files: File[];
   summary: IntakeSummary | null;
-  heroCandidates: HeroCandidate[];
+  photoAssessments: PhotoAssessment[];
+  filter: FilterTag;
+  overrides: Record<string, PhotoOverride>;
 }
 
 const state: AppState = {
   files: [],
   summary: null,
-  heroCandidates: []
+  photoAssessments: [],
+  filter: "all",
+  overrides: {}
 };
 
 function toMetricClass(value: number): "good" | "warn" | "bad" {
@@ -34,12 +47,10 @@ function toMetricClass(value: number): "good" | "warn" | "bad" {
 }
 
 function prettySceneTag(tag: SceneTag): string {
-  switch (tag) {
-    case "primary-bedroom":
-      return "primary bedroom";
-    default:
-      return tag;
+  if (tag === "primary-bedroom") {
+    return "primary bedroom";
   }
+  return tag;
 }
 
 function extractChannelMetrics(pixels: Uint8ClampedArray): {
@@ -47,6 +58,14 @@ function extractChannelMetrics(pixels: Uint8ClampedArray): {
   contrast: number;
   saturation: number;
   sharpness: number;
+  edgeDensity: number;
+  blueRatio: number;
+  greenRatio: number;
+  warmRatio: number;
+  brightPixelRatio: number;
+  darkPixelRatio: number;
+  perceptualHash: string;
+  colorHistogram: number[];
 } {
   const channelCount = Math.floor(pixels.length / 4);
   if (channelCount === 0) {
@@ -54,14 +73,29 @@ function extractChannelMetrics(pixels: Uint8ClampedArray): {
       brightness: 0.5,
       contrast: 0,
       saturation: 0,
-      sharpness: 0
+      sharpness: 0,
+      edgeDensity: 0,
+      blueRatio: 0,
+      greenRatio: 0,
+      warmRatio: 0,
+      brightPixelRatio: 0,
+      darkPixelRatio: 0,
+      perceptualHash: "",
+      colorHistogram: []
     };
   }
 
   let lumaSum = 0;
   let lumaSquaredSum = 0;
   let saturationSum = 0;
+  let blueCount = 0;
+  let greenCount = 0;
+  let warmCount = 0;
+  let brightCount = 0;
+  let darkCount = 0;
+
   const luminanceValues = new Float32Array(channelCount);
+  const colorHistogram = new Array<number>(12).fill(0);
 
   for (let index = 0, pixelIndex = 0; pixelIndex < pixels.length; index += 1, pixelIndex += 4) {
     const r = (pixels[pixelIndex] ?? 0) / 255;
@@ -71,6 +105,29 @@ function extractChannelMetrics(pixels: Uint8ClampedArray): {
     const min = Math.min(r, g, b);
     const sat = max === 0 ? 0 : (max - min) / max;
     const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+    if (b > r + 0.06 && b > g + 0.04) {
+      blueCount += 1;
+    }
+    if (g > r + 0.03 && g > b + 0.03) {
+      greenCount += 1;
+    }
+    if (r > b + 0.04 && r > g * 0.8) {
+      warmCount += 1;
+    }
+    if (luma > 0.82) {
+      brightCount += 1;
+    }
+    if (luma < 0.18) {
+      darkCount += 1;
+    }
+
+    const redBin = Math.min(3, Math.floor(r * 4));
+    const greenBin = Math.min(3, Math.floor(g * 4));
+    const blueBin = Math.min(3, Math.floor(b * 4));
+    colorHistogram[redBin] = (colorHistogram[redBin] ?? 0) + 1;
+    colorHistogram[4 + greenBin] = (colorHistogram[4 + greenBin] ?? 0) + 1;
+    colorHistogram[8 + blueBin] = (colorHistogram[8 + blueBin] ?? 0) + 1;
 
     luminanceValues[index] = luma;
     saturationSum += sat;
@@ -84,19 +141,49 @@ function extractChannelMetrics(pixels: Uint8ClampedArray): {
   const saturation = saturationSum / channelCount;
 
   let sharpnessSum = 0;
+  let edgeCount = 0;
   for (let index = 1; index < luminanceValues.length - 1; index += 1) {
     const previous = luminanceValues[index - 1] ?? 0;
     const current = luminanceValues[index] ?? 0;
     const next = luminanceValues[index + 1] ?? 0;
-    sharpnessSum += Math.abs(previous - 2 * current + next);
+    const edgeValue = Math.abs(previous - 2 * current + next);
+    sharpnessSum += edgeValue;
+    if (edgeValue > 0.14) {
+      edgeCount += 1;
+    }
   }
-  const sharpness = sharpnessSum / Math.max(luminanceValues.length - 2, 1);
+
+  const sharpness = (sharpnessSum / Math.max(luminanceValues.length - 2, 1)) * 255;
+  const edgeDensity = edgeCount / Math.max(luminanceValues.length - 2, 1);
+
+  const hashSize = 8;
+  const hashBits: string[] = [];
+  const sampleStep = Math.max(1, Math.floor(luminanceValues.length / (hashSize * hashSize)));
+  const samples: number[] = [];
+  for (let index = 0; index < hashSize * hashSize; index += 1) {
+    const sampleValue = luminanceValues[Math.min(luminanceValues.length - 1, index * sampleStep)] ?? 0;
+    samples.push(sampleValue);
+  }
+  const sampleMean = samples.reduce((total, value) => total + value, 0) / Math.max(samples.length, 1);
+  for (const sample of samples) {
+    hashBits.push(sample >= sampleMean ? "1" : "0");
+  }
+
+  const normalizedHistogram = colorHistogram.map((value) => value / (channelCount * 3));
 
   return {
     brightness: meanLuma,
     contrast,
     saturation,
-    sharpness: sharpness * 255
+    sharpness,
+    edgeDensity,
+    blueRatio: blueCount / channelCount,
+    greenRatio: greenCount / channelCount,
+    warmRatio: warmCount / channelCount,
+    brightPixelRatio: brightCount / channelCount,
+    darkPixelRatio: darkCount / channelCount,
+    perceptualHash: hashBits.join(""),
+    colorHistogram: normalizedHistogram
   };
 }
 
@@ -104,7 +191,7 @@ async function analyzePhoto(file: File): Promise<PhotoMetrics> {
   const bitmap = await createImageBitmap(file);
   const originalWidth = bitmap.width;
   const originalHeight = bitmap.height;
-  const maxDimension = 420;
+  const maxDimension = 360;
   const scale = Math.min(maxDimension / bitmap.width, maxDimension / bitmap.height, 1);
   const width = Math.max(1, Math.round(bitmap.width * scale));
   const height = Math.max(1, Math.round(bitmap.height * scale));
@@ -121,7 +208,7 @@ async function analyzePhoto(file: File): Promise<PhotoMetrics> {
   bitmap.close();
 
   const pixels = context.getImageData(0, 0, width, height).data;
-  const { brightness, contrast, saturation, sharpness } = extractChannelMetrics(pixels);
+  const channelMetrics = extractChannelMetrics(pixels);
 
   return {
     fileName: file.name,
@@ -129,10 +216,18 @@ async function analyzePhoto(file: File): Promise<PhotoMetrics> {
     thumbnailUrl: URL.createObjectURL(file),
     width: originalWidth,
     height: originalHeight,
-    brightness,
-    contrast,
-    saturation,
-    sharpness
+    brightness: channelMetrics.brightness,
+    contrast: channelMetrics.contrast,
+    saturation: channelMetrics.saturation,
+    sharpness: channelMetrics.sharpness,
+    edgeDensity: channelMetrics.edgeDensity,
+    blueRatio: channelMetrics.blueRatio,
+    greenRatio: channelMetrics.greenRatio,
+    warmRatio: channelMetrics.warmRatio,
+    brightPixelRatio: channelMetrics.brightPixelRatio,
+    darkPixelRatio: channelMetrics.darkPixelRatio,
+    perceptualHash: channelMetrics.perceptualHash,
+    colorHistogram: channelMetrics.colorHistogram
   };
 }
 
@@ -146,79 +241,6 @@ function setProgress(percent: number, text: string): void {
 
   if (progressText) {
     progressText.textContent = text;
-  }
-}
-
-function renderTopFive(candidates: HeroCandidate[]): void {
-  const topFive = document.getElementById("heroTop5");
-  if (!topFive) {
-    return;
-  }
-
-  topFive.innerHTML = "";
-  const leaders = candidates.slice(0, 5);
-  if (leaders.length === 0) {
-    const li = document.createElement("li");
-    li.textContent = "No hero candidates yet.";
-    topFive.appendChild(li);
-    return;
-  }
-
-  for (const candidate of leaders) {
-    const li = document.createElement("li");
-    li.textContent = `${candidate.fileName} (${candidate.heroScore}/100, ${prettySceneTag(candidate.sceneTag)}): ${candidate.reasons.join("; ")}`;
-    topFive.appendChild(li);
-  }
-}
-
-function renderPhotoTable(candidates: HeroCandidate[]): void {
-  const table = document.getElementById("photoTable");
-  if (!table) {
-    return;
-  }
-
-  if (candidates.length === 0) {
-    table.innerHTML = "<p>No photos detected in this folder.</p>";
-    return;
-  }
-
-  const rows = candidates.map((candidate, index) => {
-    const scoreClass = toMetricClass(candidate.heroScore);
-    const brightness = Math.round(candidate.brightnessScore);
-    const sharpness = Math.round(candidate.sharpnessScore);
-    const resolution = Math.round(candidate.resolutionScore);
-    const aspect = Math.round(candidate.aspectRatioScore);
-
-    return `<div class="photo-row">
-      <img class="thumb" src="${candidate.thumbnailUrl}" alt="${candidate.fileName}" />
-      <div>
-        <strong>#${index + 1} ${candidate.fileName}</strong>
-        <small>${prettySceneTag(candidate.sceneTag)} | ${candidate.width}x${candidate.height}</small>
-      </div>
-      <div class="metric ${scoreClass}">${candidate.heroScore}<small>Hero</small></div>
-      <div class="metric hide-mobile">${sharpness}<small>Sharpness</small></div>
-      <div class="metric hide-mobile">${brightness}<small>Brightness</small></div>
-      <div class="metric hide-mobile">${resolution}<small>Resolution</small></div>
-      <div class="metric hide-mobile">${aspect}<small>Aspect</small></div>
-    </div>`;
-  });
-
-  table.innerHTML = rows.join("");
-}
-
-function updateList(id: string, values: string[], emptyState: string): void {
-  const list = document.getElementById(id);
-  if (!list) {
-    return;
-  }
-
-  list.innerHTML = "";
-  const items = values.length > 0 ? values : [emptyState];
-
-  for (const item of items) {
-    const li = document.createElement("li");
-    li.textContent = item;
-    list.appendChild(li);
   }
 }
 
@@ -239,9 +261,174 @@ function triggerDownload(fileName: string, mimeType: string, content: string): v
   URL.revokeObjectURL(url);
 }
 
+function overrideFor(path: string): PhotoOverride {
+  return state.overrides[path] ?? {};
+}
+
+function withOverrides(photo: PhotoAssessment): PhotoAssessment {
+  const override = overrideFor(photo.filePath);
+  const decision = override.decision ?? photo.decision;
+  const sceneTag = override.sceneTag ?? photo.sceneTag;
+  let recommendationReasons = photo.recommendationReasons;
+
+  if (override.decision) {
+    if (decision === "recommended") {
+      recommendationReasons = ["Promoted by manual override for MLS inclusion."];
+    } else if (decision === "needs-work") {
+      recommendationReasons = ["Marked needs-work by manual override."];
+    } else {
+      recommendationReasons = ["Marked remove by manual override."];
+    }
+  }
+
+  return {
+    ...photo,
+    sceneTag,
+    decision,
+    recommendationReasons,
+    recommendedMlsOrder: override.rank ?? photo.recommendedMlsOrder
+  };
+}
+
+function effectivePhotos(): PhotoAssessment[] {
+  return state.photoAssessments.map((item) => withOverrides(item));
+}
+
+function filteredPhotos(): PhotoAssessment[] {
+  const photos = [...effectivePhotos()].sort((a, b) => a.recommendedMlsOrder - b.recommendedMlsOrder);
+  if (state.filter === "all") {
+    return photos;
+  }
+  return photos.filter((photo) => photo.decision === state.filter);
+}
+
+function updateList(id: string, values: string[], emptyState: string): void {
+  const list = document.getElementById(id);
+  if (!list) {
+    return;
+  }
+
+  list.innerHTML = "";
+  const items = values.length > 0 ? values : [emptyState];
+
+  for (const item of items) {
+    const li = document.createElement("li");
+    li.textContent = item;
+    list.appendChild(li);
+  }
+}
+
+function renderTopFive(photos: PhotoAssessment[]): void {
+  const list = document.getElementById("heroTop5");
+  if (!list) {
+    return;
+  }
+
+  const top = [...photos]
+    .filter((photo) => photo.decision !== "remove")
+    .sort((a, b) => b.heroScore - a.heroScore)
+    .slice(0, 5);
+
+  list.innerHTML = "";
+  if (top.length === 0) {
+    const li = document.createElement("li");
+    li.textContent = "No hero candidates yet.";
+    list.appendChild(li);
+    return;
+  }
+
+  top.forEach((photo) => {
+    const li = document.createElement("li");
+    li.textContent = `${photo.fileName} (${photo.heroScore}/100, ${prettySceneTag(photo.sceneTag)}): ${photo.recommendationReasons.join(" ")}`;
+    list.appendChild(li);
+  });
+}
+
+function selectOptions<T extends string>(options: T[], selected: T): string {
+  return options
+    .map((option) => `<option value="${option}" ${selected === option ? "selected" : ""}>${option}</option>`)
+    .join("");
+}
+
+function renderPhotoTable(photos: PhotoAssessment[]): void {
+  const table = document.getElementById("photoTable");
+  if (!table) {
+    return;
+  }
+
+  if (photos.length === 0) {
+    table.innerHTML = "<p>No photos available for this filter.</p>";
+    return;
+  }
+
+  const rows = photos
+    .map((photo) => {
+      const scoreClass = toMetricClass(photo.heroScore);
+      const issues = photo.issues.length > 0 ? photo.issues.join(", ") : "none";
+      const duplicate = photo.duplicateGroupId ? `D${photo.duplicateGroupId}` : "-";
+      const similar = photo.similarGroupId ? `S${photo.similarGroupId}` : "-";
+
+      return `<div class="photo-row" data-photo-path="${photo.filePath}">
+        <img class="thumb" src="${photo.thumbnailUrl}" alt="${photo.fileName}" />
+        <div>
+          <strong>${photo.fileName}</strong>
+          <small>${photo.width}x${photo.height} | scene: ${prettySceneTag(photo.sceneTag)} | dup: ${duplicate} | sim: ${similar}</small>
+          <small>Scores: sharpness ${photo.scores.sharpness}, exposure ${photo.scores.exposure}, brightness ${photo.scores.brightness}, contrast ${photo.scores.contrast}, resolution ${photo.scores.resolution}, orientation ${photo.scores.orientation}, aspect ${photo.scores.usableAspect}</small>
+          <small>Issues: ${issues}</small>
+          <small>Recommendation: ${photo.recommendationReasons.join(" ")}</small>
+        </div>
+        <div class="metric ${scoreClass}">${photo.heroScore}<small>Hero</small></div>
+        <div class="metric hide-mobile">${photo.recommendedMlsOrder}<small>MLS order</small></div>
+        <div class="control-block">
+          <label>Room
+            <select class="scene-override" data-path="${photo.filePath}">${selectOptions<SceneTag>(["exterior", "backyard", "kitchen", "primary-bedroom", "bathroom", "interior", "unknown"], photo.sceneTag)}</select>
+          </label>
+        </div>
+        <div class="control-block">
+          <label>Decision
+            <select class="decision-override" data-path="${photo.filePath}">${selectOptions<DecisionTag>(["recommended", "needs-work", "remove"], photo.decision)}</select>
+          </label>
+        </div>
+        <div class="control-block">
+          <label>Rank
+            <input type="number" min="1" class="rank-override" data-path="${photo.filePath}" value="${photo.recommendedMlsOrder}" />
+          </label>
+        </div>
+      </div>`;
+    })
+    .join("");
+
+  table.innerHTML = rows;
+}
+
+function updateFilterButtons(): void {
+  const buttons = document.querySelectorAll<HTMLButtonElement>("[data-filter]");
+  buttons.forEach((button) => {
+    if (button.dataset.filter === state.filter) {
+      button.classList.add("active");
+    } else {
+      button.classList.remove("active");
+    }
+  });
+}
+
+function updateDashboardFromState(): void {
+  const photos = effectivePhotos();
+  const filtered = filteredPhotos();
+
+  renderTopFive(photos);
+  renderPhotoTable(filtered);
+  updateFilterButtons();
+
+  setText("recommendedCount", `${photos.filter((photo) => photo.decision === "recommended").length}`);
+  setText("needsWorkCount", `${photos.filter((photo) => photo.decision === "needs-work").length}`);
+  setText("removeCount", `${photos.filter((photo) => photo.decision === "remove").length}`);
+}
+
 function renderResults(summary: IntakeSummary): void {
   const review = buildDirectorReview(summary);
   state.summary = summary;
+  state.photoAssessments = summary.photos;
 
   const results = document.getElementById("results");
   const progressCard = document.getElementById("progressCard");
@@ -267,8 +454,6 @@ function renderResults(summary: IntakeSummary): void {
   updateList("missingMedia", review.missingMedia, "No missing media detected.");
   updateList("shotChecklist", review.missingShotChecklist, "No critical missing shot detected.");
   updateList("actions", review.actionItems, "No action items.");
-  renderTopFive(summary.heroCandidates);
-  renderPhotoTable(summary.heroCandidates);
 
   const downloadTextBtn = document.getElementById("downloadTextBtn");
   if (downloadTextBtn) {
@@ -283,11 +468,14 @@ function renderResults(summary: IntakeSummary): void {
     downloadJsonBtn.onclick = () => {
       const payload = {
         summary,
-        review
+        review,
+        photos: effectivePhotos()
       };
       triggerDownload("director-intake-report.json", "application/json", JSON.stringify(payload, null, 2));
     };
   }
+
+  updateDashboardFromState();
 }
 
 async function processIntake(files: File[], address: string, listPrice: string): Promise<void> {
@@ -327,16 +515,14 @@ async function processIntake(files: File[], address: string, listPrice: string):
     }
   }
 
-  setProgress(100, "Generating complete Director dashboard");
-  const heroCandidates = rankHeroCandidates(photoMetrics);
-  state.heroCandidates = heroCandidates;
+  const photos = assessPhotos(photoMetrics);
 
   const summary: IntakeSummary = {
     address,
     listPrice,
     fileCount: files.length,
     mediaCounts,
-    heroCandidates,
+    photos,
     generatedAt: new Date().toISOString()
   };
 
@@ -351,6 +537,7 @@ function assignFiles(files: File[]): void {
   if (analyzeBtn) {
     analyzeBtn.disabled = files.length === 0;
   }
+
   if (dropzone) {
     const helperText = dropzone.querySelector("span");
     if (helperText) {
@@ -359,14 +546,24 @@ function assignFiles(files: File[]): void {
   }
 }
 
+function applyOverride(path: string, patch: PhotoOverride): void {
+  const current = state.overrides[path] ?? {};
+  state.overrides[path] = {
+    ...current,
+    ...patch
+  };
+  updateDashboardFromState();
+}
+
 function initializeIntakeApp(): void {
   const folderInput = document.getElementById("folderInput") as HTMLInputElement | null;
   const analyzeBtn = document.getElementById("analyzeBtn") as HTMLButtonElement | null;
   const dropzone = document.getElementById("dropzone");
   const addressInput = document.getElementById("address") as HTMLInputElement | null;
   const priceInput = document.getElementById("price") as HTMLInputElement | null;
+  const table = document.getElementById("photoTable");
 
-  if (!folderInput || !analyzeBtn || !dropzone || !addressInput || !priceInput) {
+  if (!folderInput || !analyzeBtn || !dropzone || !addressInput || !priceInput || !table) {
     return;
   }
 
@@ -401,6 +598,47 @@ function initializeIntakeApp(): void {
         analyzeBtn.disabled = false;
       }
     })();
+  });
+
+  const filterButtons = document.querySelectorAll<HTMLButtonElement>("[data-filter]");
+  filterButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const filter = button.dataset.filter as FilterTag | undefined;
+      if (!filter) {
+        return;
+      }
+      state.filter = filter;
+      updateDashboardFromState();
+    });
+  });
+
+  table.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const path = target.getAttribute("data-path");
+    if (!path) {
+      return;
+    }
+
+    if (target.classList.contains("scene-override") && target instanceof HTMLSelectElement) {
+      applyOverride(path, { sceneTag: target.value as SceneTag });
+      return;
+    }
+
+    if (target.classList.contains("decision-override") && target instanceof HTMLSelectElement) {
+      applyOverride(path, { decision: target.value as DecisionTag });
+      return;
+    }
+
+    if (target.classList.contains("rank-override") && target instanceof HTMLInputElement) {
+      const rank = Number(target.value);
+      if (Number.isFinite(rank) && rank > 0) {
+        applyOverride(path, { rank });
+      }
+    }
   });
 }
 

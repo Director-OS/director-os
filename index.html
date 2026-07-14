@@ -14,7 +14,7 @@
         <h1>Listing Intake</h1>
         <p class="sub">Drop an unnamed listing folder. Director audits all media and builds a launch-ready dashboard.</p>
       </div>
-      <span class="version">v0.2</span>
+      <span class="version">v0.3</span>
     </header>
 
     <section class="card intake">
@@ -45,6 +45,9 @@
         <article class="card score-card"><span>PDFs</span><strong id="pdfCount">0</strong><small>Brochure and handouts</small></article>
         <article class="card score-card"><span>Documents</span><strong id="documentCount">0</strong><small>Disclosures and notes</small></article>
         <article class="card score-card"><span>Other files</span><strong id="otherCount">0</strong><small>Unclassified uploads</small></article>
+        <article class="card score-card"><span>Recommended</span><strong id="recommendedCount">0</strong><small>Ready for MLS</small></article>
+        <article class="card score-card"><span>Needs Work</span><strong id="needsWorkCount">0</strong><small>Retouch or re-shoot</small></article>
+        <article class="card score-card"><span>Remove</span><strong id="removeCount">0</strong><small>Duplicates or low quality</small></article>
       </div>
 
       <div class="two-col">
@@ -83,8 +86,14 @@
       <article class="card">
         <div class="section-head">
           <div>
-            <h2>Photo QA and Scene Flags</h2>
-            <p>All photo files with thumbnail previews, score breakdowns, and likely scene tags.</p>
+            <h2>Photo Quality and Sequencing</h2>
+            <p>Every photo includes quality scores, issues, duplicate/similarity signals, and editable MLS sequencing controls.</p>
+          </div>
+          <div class="filter-row">
+            <button class="filter-btn active" data-filter="all">All</button>
+            <button class="filter-btn" data-filter="recommended">Recommended</button>
+            <button class="filter-btn" data-filter="needs-work">Needs Work</button>
+            <button class="filter-btn" data-filter="remove">Remove</button>
           </div>
         </div>
         <div id="photoTable" class="photo-table"></div>

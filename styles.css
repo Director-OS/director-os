@@ -24,7 +24,7 @@ body {
 }
 
 .shell {
-  width: min(1240px, 94vw);
+  width: min(1320px, 95vw);
   margin: 0 auto;
   padding: 42px 0 70px;
 }
@@ -135,13 +135,14 @@ label {
   color: #dfe6f2;
 }
 
-input {
+input,
+select {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: #0c1524;
   color: var(--text);
-  padding: 13px 14px;
+  padding: 10px 12px;
   font: inherit;
 }
 
@@ -166,10 +167,22 @@ button:disabled {
   color: var(--text);
 }
 
-.button-row {
+.button-row,
+.filter-row {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+.filter-btn {
+  background: #1f304a;
+  color: #d8e0ee;
+  padding: 10px 14px;
+}
+
+.filter-btn.active {
+  background: var(--accent);
+  color: #16120a;
 }
 
 .hidden {
@@ -193,7 +206,7 @@ button:disabled {
 
 .score-grid {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  grid-template-columns: repeat(10, 1fr);
   gap: 14px;
   margin: 18px 0;
 }
@@ -209,7 +222,7 @@ button:disabled {
 }
 
 .score-card strong {
-  font-size: 34px;
+  font-size: 28px;
   line-height: 1;
 }
 
@@ -247,7 +260,7 @@ ul {
   margin: 0 0 14px;
   padding-left: 20px;
   color: #e9eef7;
-  line-height: 1.7;
+  line-height: 1.6;
 }
 
 .section-head {
@@ -274,9 +287,9 @@ ul {
 
 .photo-row {
   display: grid;
-  grid-template-columns: 88px minmax(220px, 1.6fr) repeat(5, minmax(90px, 0.7fr));
-  align-items: center;
-  gap: 12px;
+  grid-template-columns: 86px minmax(220px, 2fr) 86px 96px repeat(3, minmax(140px, 1fr));
+  align-items: start;
+  gap: 10px;
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -284,8 +297,8 @@ ul {
 }
 
 .thumb {
-  width: 88px;
-  height: 60px;
+  width: 86px;
+  height: 62px;
   border-radius: 8px;
   object-fit: cover;
   border: 1px solid #40526e;
@@ -293,12 +306,24 @@ ul {
 
 .metric {
   font-weight: 800;
+  font-size: 18px;
 }
 
 .metric small {
   display: block;
   font-weight: 500;
   color: var(--muted);
+  font-size: 12px;
+}
+
+.control-block {
+  display: grid;
+  gap: 6px;
+}
+
+.control-block label {
+  font-size: 12px;
+  color: #dbe3f0;
 }
 
 .good {
@@ -313,13 +338,17 @@ ul {
   color: var(--bad);
 }
 
-@media (max-width: 1200px) {
+@media (max-width: 1280px) {
   .score-grid {
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
+  }
+
+  .photo-row {
+    grid-template-columns: 86px 1fr 86px 96px;
   }
 }
 
-@media (max-width: 900px) {
+@media (max-width: 920px) {
   .score-grid {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -333,10 +362,11 @@ ul {
   }
 
   .photo-row {
-    grid-template-columns: 88px 1fr;
+    grid-template-columns: 86px 1fr;
   }
 
   .photo-row .metric,
+  .photo-row .control-block,
   .photo-row .hide-mobile {
     display: none;
   }
