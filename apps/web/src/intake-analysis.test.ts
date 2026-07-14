@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  assessPhotos,
   buildDirectorReview,
   classifyMedia,
   createTextReport,
-  rankHeroCandidates,
   type IntakeSummary,
   type PhotoMetrics
 } from "./intake-analysis.js";
@@ -12,11 +12,11 @@ import {
 describe("intake analysis", () => {
   it("classifies media inventory by type and extension", () => {
     const counts = classifyMedia([
-      { name: "front.jpg", type: "image/jpeg" },
-      { name: "walkthrough.mp4", type: "video/mp4" },
+      { name: "IMG_0001.JPG", type: "image/jpeg" },
+      { name: "IMG_0002.MP4", type: "video/mp4" },
       { name: "brochure.pdf", type: "application/pdf" },
-      { name: "disclosure.docx", type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
-      { name: "notes.unknown" }
+      { name: "notes.txt", type: "text/plain" },
+      { name: "blob.bin" }
     ]);
 
     expect(counts).toEqual({
@@ -28,94 +28,124 @@ describe("intake analysis", () => {
     });
   });
 
-  it("ranks strongest hero candidate first and includes scoring breakdown", () => {
+  it("detects probable duplicates and assigns remove decision", () => {
     const photos: PhotoMetrics[] = [
       {
-        fileName: "front-exterior.jpg",
-        filePath: "listing/front-exterior.jpg",
-        thumbnailUrl: "blob:hero",
-        width: 3200,
-        height: 2000,
+        fileName: "IMG_0001.JPG",
+        filePath: "IMG_0001.JPG",
+        thumbnailUrl: "blob:1",
+        width: 2800,
+        height: 1800,
         brightness: 0.56,
-        contrast: 0.18,
-        saturation: 0.34,
-        sharpness: 40
+        contrast: 0.14,
+        saturation: 0.31,
+        sharpness: 42,
+        edgeDensity: 0.15,
+        blueRatio: 0.23,
+        greenRatio: 0.22,
+        warmRatio: 0.35,
+        brightPixelRatio: 0.06,
+        darkPixelRatio: 0.04,
+        perceptualHash: "1111000011110000111100001111000011110000111100001111000011110000",
+        colorHistogram: Array.from({ length: 12 }, () => 1 / 12)
       },
       {
-        fileName: "dark-soft.jpg",
-        filePath: "listing/dark-soft.jpg",
-        thumbnailUrl: "blob:dark",
-        width: 1600,
-        height: 1200,
-        brightness: 0.22,
-        contrast: 0.08,
-        saturation: 0.1,
-        sharpness: 10
+        fileName: "IMG_0002.JPG",
+        filePath: "IMG_0002.JPG",
+        thumbnailUrl: "blob:2",
+        width: 2800,
+        height: 1800,
+        brightness: 0.55,
+        contrast: 0.14,
+        saturation: 0.31,
+        sharpness: 41,
+        edgeDensity: 0.15,
+        blueRatio: 0.23,
+        greenRatio: 0.22,
+        warmRatio: 0.35,
+        brightPixelRatio: 0.06,
+        darkPixelRatio: 0.04,
+        perceptualHash: "1111000011110000111100001111000011110000111100001111000011110001",
+        colorHistogram: Array.from({ length: 12 }, () => 1 / 12)
       }
     ];
 
-    const ranked = rankHeroCandidates(photos);
+    const assessed = assessPhotos(photos);
 
-    expect(ranked[0]?.fileName).toBe("front-exterior.jpg");
-    expect(ranked[0]?.heroScore).toBeGreaterThan(ranked[1]?.heroScore ?? 0);
-    expect(ranked[0]?.resolutionScore).toBeGreaterThan(0);
-    expect(ranked[0]?.sceneTag).toBe("exterior");
+    expect(assessed.length).toBe(2);
+    expect(assessed.some((item) => item.decision === "remove")).toBe(true);
+    expect(assessed.some((item) => item.issues.includes("redundant"))).toBe(true);
   });
 
-  it("flags bathroom shots from filename keywords", () => {
-    const ranked = rankHeroCandidates([
+  it("uses pixel traits for scene inference with unnamed files", () => {
+    const assessed = assessPhotos([
       {
-        fileName: "bathroom-ensuite.png",
-        filePath: "listing/bathroom-ensuite.png",
-        thumbnailUrl: "blob:bath",
-        width: 2200,
-        height: 1400,
-        brightness: 0.52,
-        contrast: 0.12,
-        saturation: 0.2,
-        sharpness: 28
+        fileName: "IMG_0007.JPG",
+        filePath: "IMG_0007.JPG",
+        thumbnailUrl: "blob:7",
+        width: 3200,
+        height: 1900,
+        brightness: 0.62,
+        contrast: 0.18,
+        saturation: 0.3,
+        sharpness: 46,
+        edgeDensity: 0.12,
+        blueRatio: 0.34,
+        greenRatio: 0.2,
+        warmRatio: 0.2,
+        brightPixelRatio: 0.08,
+        darkPixelRatio: 0.03,
+        perceptualHash: "1010101010101010101010101010101010101010101010101010101010101010",
+        colorHistogram: [0.08, 0.07, 0.06, 0.04, 0.03, 0.07, 0.09, 0.05, 0.12, 0.13, 0.14, 0.12]
       }
     ]);
 
-    expect(ranked[0]?.sceneTag).toBe("bathroom");
+    expect(assessed[0]?.sceneTag).toBe("exterior");
   });
 
-  it("builds review with missing-shot checklist and report content", () => {
+  it("builds review and text report with sequencing", () => {
+    const photos = assessPhotos([
+      {
+        fileName: "IMG_1001.JPG",
+        filePath: "IMG_1001.JPG",
+        thumbnailUrl: "blob:a",
+        width: 3200,
+        height: 1900,
+        brightness: 0.58,
+        contrast: 0.16,
+        saturation: 0.3,
+        sharpness: 42,
+        edgeDensity: 0.13,
+        blueRatio: 0.31,
+        greenRatio: 0.24,
+        warmRatio: 0.25,
+        brightPixelRatio: 0.07,
+        darkPixelRatio: 0.04,
+        perceptualHash: "1001100110011001100110011001100110011001100110011001100110011001",
+        colorHistogram: Array.from({ length: 12 }, () => 1 / 12)
+      }
+    ]);
+
     const summary: IntakeSummary = {
-      address: "10 Coastal Drive",
-      listPrice: "$875,000",
-      fileCount: 19,
+      address: "55 Test Drive",
+      listPrice: "$515,000",
+      fileCount: 4,
       mediaCounts: {
-        photos: 18,
+        photos: 1,
         videos: 0,
         pdfs: 0,
-        documents: 1,
-        other: 0
+        documents: 0,
+        other: 3
       },
-      heroCandidates: rankHeroCandidates([
-        {
-          fileName: "kitchen.jpg",
-          filePath: "listing/kitchen.jpg",
-          thumbnailUrl: "blob:kitchen",
-          width: 2800,
-          height: 1800,
-          brightness: 0.54,
-          contrast: 0.16,
-          saturation: 0.32,
-          sharpness: 36
-        }
-      ]),
-      generatedAt: "2026-07-13T12:00:00.000Z"
+      photos,
+      generatedAt: "2026-07-14T00:00:00.000Z"
     };
 
     const review = buildDirectorReview(summary);
     const report = createTextReport(summary, review);
 
-    expect(review.launchReadinessScore).toBeLessThan(85);
-    expect(review.missingMedia.length).toBeGreaterThan(0);
     expect(review.missingShotChecklist.length).toBeGreaterThan(0);
-    expect(report).toContain("Director Intake Report");
-    expect(report).toContain("Missing Shot Checklist");
-    expect(report).toContain("Likely Buyer Angle");
+    expect(report).toContain("Recommended MLS Order");
+    expect(report).toContain("IMG_1001.JPG");
   });
 });

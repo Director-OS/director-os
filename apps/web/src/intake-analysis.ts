@@ -13,14 +13,9 @@ export interface MediaCounts {
   other: number;
 }
 
-export type SceneTag =
-  | "exterior"
-  | "backyard"
-  | "kitchen"
-  | "primary-bedroom"
-  | "bathroom"
-  | "interior"
-  | "unknown";
+export type SceneTag = "exterior" | "backyard" | "kitchen" | "primary-bedroom" | "bathroom" | "interior" | "unknown";
+
+export type DecisionTag = "recommended" | "needs-work" | "remove";
 
 export interface PhotoMetrics {
   fileName: string;
@@ -32,19 +27,39 @@ export interface PhotoMetrics {
   contrast: number;
   saturation: number;
   sharpness: number;
+  edgeDensity: number;
+  blueRatio: number;
+  greenRatio: number;
+  warmRatio: number;
+  brightPixelRatio: number;
+  darkPixelRatio: number;
+  perceptualHash: string;
+  colorHistogram: number[];
 }
 
-export interface HeroCandidate extends PhotoMetrics {
-  orientation: "landscape" | "portrait" | "square";
+export interface PhotoScores {
+  sharpness: number;
+  exposure: number;
+  brightness: number;
+  contrast: number;
+  resolution: number;
+  orientation: number;
+  usableAspect: number;
+}
+
+export interface PhotoAssessment extends PhotoMetrics {
   sceneTag: SceneTag;
-  brightnessScore: number;
-  sharpnessScore: number;
-  resolutionScore: number;
-  aspectRatioScore: number;
-  contrastScore: number;
-  saturationScore: number;
+  scores: PhotoScores;
+  totalScore: number;
+  issues: string[];
+  scoreReasons: string[];
+  recommendationReasons: string[];
+  decision: DecisionTag;
+  duplicateGroupId: number | null;
+  similarGroupId: number | null;
+  duplicateOfPath: string | null;
+  recommendedMlsOrder: number;
   heroScore: number;
-  reasons: string[];
 }
 
 export interface DirectorReview {
@@ -62,21 +77,13 @@ export interface IntakeSummary {
   listPrice: string;
   fileCount: number;
   mediaCounts: MediaCounts;
-  heroCandidates: HeroCandidate[];
+  photos: PhotoAssessment[];
   generatedAt: string;
 }
 
 const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "heic", "heif", "avif"]);
 const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "m4v", "avi", "mkv", "webm"]);
 const DOCUMENT_EXTENSIONS = new Set(["doc", "docx", "txt", "rtf", "xlsx", "csv", "ppt", "pptx"]);
-
-const SCENE_KEYWORDS: Array<{ tag: SceneTag; terms: string[] }> = [
-  { tag: "exterior", terms: ["front", "exterior", "facade", "curb", "driveway", "elevation", "aerial"] },
-  { tag: "backyard", terms: ["backyard", "back-yard", "patio", "deck", "pool", "garden", "yard", "lawn"] },
-  { tag: "kitchen", terms: ["kitchen", "island", "pantry"] },
-  { tag: "bathroom", terms: ["bath", "bathroom", "ensuite", "vanity", "shower", "tub"] },
-  { tag: "primary-bedroom", terms: ["primary", "master", "bedroom"] },
-];
 
 function getExtension(fileName: string): string {
   const segments = fileName.toLowerCase().split(".");
@@ -140,105 +147,340 @@ function normalize(value: number, min: number, max: number): number {
   return Math.round(((value - min) / (max - min)) * 100);
 }
 
-function scoreBrightness(brightness: number): number {
-  const target = 0.56;
-  const distance = Math.min(Math.abs(brightness - target), 0.56);
-  return Math.round((1 - distance / 0.56) * 100);
+function hammingDistance(hashA: string, hashB: string): number {
+  const length = Math.min(hashA.length, hashB.length);
+  let distance = 0;
+
+  for (let index = 0; index < length; index += 1) {
+    if (hashA[index] !== hashB[index]) {
+      distance += 1;
+    }
+  }
+
+  distance += Math.abs(hashA.length - hashB.length);
+  return distance;
+}
+
+function histogramDistance(histA: number[], histB: number[]): number {
+  const length = Math.min(histA.length, histB.length);
+  if (length === 0) {
+    return 1;
+  }
+
+  let distance = 0;
+  for (let index = 0; index < length; index += 1) {
+    distance += Math.abs((histA[index] ?? 0) - (histB[index] ?? 0));
+  }
+
+  return distance / length;
+}
+
+function inferSceneFromPixels(photo: PhotoMetrics): SceneTag {
+  const landscape = photo.width > photo.height;
+
+  if (photo.greenRatio > 0.37 && landscape) {
+    return "backyard";
+  }
+
+  if ((photo.blueRatio > 0.26 || photo.greenRatio > 0.24) && photo.brightness > 0.5 && landscape) {
+    return "exterior";
+  }
+
+  if (photo.warmRatio > 0.34 && photo.edgeDensity > 0.12 && photo.brightness > 0.42) {
+    return "kitchen";
+  }
+
+  if (photo.saturation < 0.2 && photo.brightness > 0.52 && photo.contrast > 0.08) {
+    return "bathroom";
+  }
+
+  if (photo.darkPixelRatio > 0.22 && photo.edgeDensity < 0.11 && photo.brightness < 0.5) {
+    return "primary-bedroom";
+  }
+
+  if (photo.edgeDensity > 0.08) {
+    return "interior";
+  }
+
+  return "unknown";
 }
 
 function scoreAspectRatio(width: number, height: number): number {
   if (height === 0) {
     return 0;
   }
+
   const ratio = width / height;
   const target = 1.5;
   const distance = Math.min(Math.abs(ratio - target), 1.5);
   return Math.round((1 - distance / 1.5) * 100);
 }
 
-function inferSceneTag(photo: PhotoMetrics): SceneTag {
-  const text = `${photo.fileName} ${photo.filePath}`.toLowerCase();
-  for (const scene of SCENE_KEYWORDS) {
-    if (scene.terms.some((term) => text.includes(term))) {
-      return scene.tag;
+function scoreOrientation(width: number, height: number): number {
+  if (width > height) {
+    return 95;
+  }
+  if (width === height) {
+    return 70;
+  }
+  return 30;
+}
+
+function scoreExposure(brightPixelRatio: number, darkPixelRatio: number): number {
+  const clipped = brightPixelRatio + darkPixelRatio;
+  return Math.max(0, 100 - Math.round(clipped * 200));
+}
+
+function scoreBrightness(brightness: number): number {
+  const target = 0.56;
+  const distance = Math.min(Math.abs(brightness - target), 0.56);
+  return Math.round((1 - distance / 0.56) * 100);
+}
+
+function scorePhoto(photo: PhotoMetrics): PhotoScores {
+  return {
+    sharpness: normalize(photo.sharpness, 5, 65),
+    exposure: scoreExposure(photo.brightPixelRatio, photo.darkPixelRatio),
+    brightness: scoreBrightness(photo.brightness),
+    contrast: normalize(photo.contrast, 0.04, 0.24),
+    resolution: normalize(photo.width * photo.height, 1100 * 700, 4200 * 2800),
+    orientation: scoreOrientation(photo.width, photo.height),
+    usableAspect: scoreAspectRatio(photo.width, photo.height)
+  };
+}
+
+function totalScore(scores: PhotoScores): number {
+  return Math.round(
+    scores.sharpness * 0.24 +
+      scores.exposure * 0.16 +
+      scores.brightness * 0.14 +
+      scores.contrast * 0.1 +
+      scores.resolution * 0.2 +
+      scores.orientation * 0.06 +
+      scores.usableAspect * 0.1
+  );
+}
+
+function buildIssueFlags(scores: PhotoScores, photo: PhotoMetrics): string[] {
+  const issues: string[] = [];
+
+  if (scores.sharpness < 45) {
+    issues.push("blurry");
+  }
+  if (photo.brightness < 0.38 || scores.brightness < 45) {
+    issues.push("dark");
+  }
+  if (photo.brightPixelRatio > 0.18 || scores.exposure < 45) {
+    issues.push("overexposed");
+  }
+  if (scores.resolution < 45) {
+    issues.push("low resolution");
+  }
+  if (photo.width < photo.height || scores.orientation < 45) {
+    issues.push("vertically distorted");
+  }
+  if (scores.usableAspect < 45) {
+    issues.push("poor usable aspect ratio");
+  }
+
+  return issues;
+}
+
+function buildScoreReasons(scores: PhotoScores, issues: string[]): string[] {
+  const reasons: string[] = [
+    `Sharpness score ${scores.sharpness}/100`,
+    `Exposure score ${scores.exposure}/100`,
+    `Brightness score ${scores.brightness}/100`,
+    `Contrast score ${scores.contrast}/100`,
+    `Resolution score ${scores.resolution}/100`,
+    `Orientation score ${scores.orientation}/100`,
+    `Aspect ratio score ${scores.usableAspect}/100`
+  ];
+
+  if (issues.length === 0) {
+    reasons.push("No critical technical issues detected");
+  }
+
+  return reasons;
+}
+
+function decidePhoto(scores: PhotoScores, issues: string[]): DecisionTag {
+  if (issues.includes("low resolution") || issues.includes("blurry") || issues.includes("overexposed")) {
+    if (scores.resolution < 35 || scores.sharpness < 35) {
+      return "remove";
     }
   }
 
-  const orientation = photo.width > photo.height ? "landscape" : photo.width < photo.height ? "portrait" : "square";
-  if (orientation === "landscape" && photo.brightness > 0.5 && photo.saturation > 0.2) {
-    return "exterior";
+  if (issues.length >= 2 || scores.sharpness < 50 || scores.exposure < 50) {
+    return "needs-work";
   }
-  if (orientation === "portrait" && photo.brightness < 0.45) {
-    return "primary-bedroom";
-  }
-  if (photo.saturation < 0.15 && photo.contrast < 0.11) {
-    return "bathroom";
-  }
-  if (photo.saturation > 0.25 && photo.contrast > 0.12) {
-    return "interior";
-  }
-  return "unknown";
+
+  return "recommended";
 }
 
-export function rankHeroCandidates(metrics: PhotoMetrics[]): HeroCandidate[] {
-  return metrics
-    .map((photo) => {
-      const orientation: HeroCandidate["orientation"] =
-        photo.width > photo.height ? "landscape" : photo.width < photo.height ? "portrait" : "square";
+const SCENE_PRIORITY: SceneTag[] = ["exterior", "kitchen", "interior", "primary-bedroom", "bathroom", "backyard", "unknown"];
 
-      const resolutionScore = normalize(photo.width * photo.height, 1000 * 700, 4200 * 2800);
-      const sharpnessScore = normalize(photo.sharpness, 8, 60);
-      const contrastScore = normalize(photo.contrast, 0.06, 0.24);
-      const brightnessScore = scoreBrightness(photo.brightness);
-      const saturationScore = normalize(photo.saturation, 0.12, 0.5);
-      const aspectRatioScore = scoreAspectRatio(photo.width, photo.height);
-      const orientationBonus = orientation === "landscape" ? 6 : orientation === "square" ? 2 : 0;
+function compareForMlsOrder(a: PhotoAssessment, b: PhotoAssessment): number {
+  const aPriority = SCENE_PRIORITY.indexOf(a.sceneTag);
+  const bPriority = SCENE_PRIORITY.indexOf(b.sceneTag);
 
-      const heroScore = Math.round(
-        resolutionScore * 0.24 +
-          sharpnessScore * 0.24 +
-          contrastScore * 0.12 +
-          brightnessScore * 0.17 +
-          saturationScore * 0.08 +
-          aspectRatioScore * 0.15 +
-          orientationBonus
-      );
+  const decisionWeight = (value: DecisionTag) => {
+    if (value === "recommended") {
+      return 0;
+    }
+    if (value === "needs-work") {
+      return 1;
+    }
+    return 2;
+  };
 
-      const reasons: string[] = [];
-      if (heroScore >= 85) {
-        reasons.push("Strong overall technical quality");
-      }
-      if (resolutionScore >= 70) {
-        reasons.push("High enough resolution for launch hero usage");
-      }
-      if (sharpnessScore < 45) {
-        reasons.push("Soft focus risk in key details");
-      }
-      if (brightnessScore < 45) {
-        reasons.push("Exposure may need correction");
-      }
-      if (aspectRatioScore < 45) {
-        reasons.push("Aspect ratio is less ideal for portal hero slots");
-      }
-      if (reasons.length === 0) {
-        reasons.push("Balanced candidate for primary placement");
-      }
+  if (decisionWeight(a.decision) !== decisionWeight(b.decision)) {
+    return decisionWeight(a.decision) - decisionWeight(b.decision);
+  }
 
-      return {
-        ...photo,
-        orientation,
-        sceneTag: inferSceneTag(photo),
-        brightnessScore,
-        sharpnessScore,
-        resolutionScore,
-        aspectRatioScore,
-        contrastScore,
-        saturationScore,
-        heroScore: Math.max(1, Math.min(100, heroScore)),
-        reasons
-      };
-    })
-    .sort((a, b) => b.heroScore - a.heroScore);
+  if (aPriority !== bPriority) {
+    return aPriority - bPriority;
+  }
+
+  return b.heroScore - a.heroScore;
+}
+
+function computeGroups(photos: PhotoAssessment[]): { duplicates: number[][]; similars: number[][] } {
+  const duplicateGroups: number[][] = [];
+  const similarGroups: number[][] = [];
+  const usedDuplicate = new Set<number>();
+  const usedSimilar = new Set<number>();
+
+  for (let i = 0; i < photos.length; i += 1) {
+    if (usedDuplicate.has(i)) {
+      continue;
+    }
+
+    const duplicateCluster = [i];
+    for (let j = i + 1; j < photos.length; j += 1) {
+      const hashDistance = hammingDistance(photos[i]?.perceptualHash ?? "", photos[j]?.perceptualHash ?? "");
+      const histDistance = histogramDistance(photos[i]?.colorHistogram ?? [], photos[j]?.colorHistogram ?? []);
+      if (hashDistance <= 5 && histDistance < 0.08) {
+        duplicateCluster.push(j);
+        usedDuplicate.add(j);
+      }
+    }
+
+    if (duplicateCluster.length > 1) {
+      duplicateGroups.push(duplicateCluster);
+      usedDuplicate.add(i);
+    }
+  }
+
+  for (let i = 0; i < photos.length; i += 1) {
+    if (usedSimilar.has(i)) {
+      continue;
+    }
+
+    const similarCluster = [i];
+    for (let j = i + 1; j < photos.length; j += 1) {
+      const hashDistance = hammingDistance(photos[i]?.perceptualHash ?? "", photos[j]?.perceptualHash ?? "");
+      const histDistance = histogramDistance(photos[i]?.colorHistogram ?? [], photos[j]?.colorHistogram ?? []);
+      if (hashDistance <= 14 && histDistance < 0.16) {
+        similarCluster.push(j);
+        usedSimilar.add(j);
+      }
+    }
+
+    if (similarCluster.length > 1) {
+      similarGroups.push(similarCluster);
+      usedSimilar.add(i);
+    }
+  }
+
+  return {
+    duplicates: duplicateGroups,
+    similars: similarGroups
+  };
+}
+
+export function assessPhotos(metrics: PhotoMetrics[]): PhotoAssessment[] {
+  const initial: PhotoAssessment[] = metrics.map((photo) => {
+    const scores = scorePhoto(photo);
+    const issues = buildIssueFlags(scores, photo);
+    const sceneTag = inferSceneFromPixels(photo);
+    const decision = decidePhoto(scores, issues);
+    const heroScore = totalScore(scores);
+
+    const assessment: PhotoAssessment = {
+      ...photo,
+      sceneTag,
+      scores,
+      totalScore: heroScore,
+      heroScore,
+      issues,
+      scoreReasons: buildScoreReasons(scores, issues),
+      recommendationReasons: [],
+      decision,
+      duplicateGroupId: null,
+      similarGroupId: null,
+      duplicateOfPath: null,
+      recommendedMlsOrder: 0
+    };
+
+    return assessment;
+  });
+
+  const groups = computeGroups(initial);
+
+  groups.duplicates.forEach((cluster, clusterIndex) => {
+    const sorted = [...cluster].sort((a, b) => (initial[b]?.heroScore ?? 0) - (initial[a]?.heroScore ?? 0));
+    const anchorIndex = sorted[0];
+    if (anchorIndex === undefined) {
+      return;
+    }
+    const anchor = initial[anchorIndex];
+
+    sorted.forEach((photoIndex, indexInCluster) => {
+      const item = initial[photoIndex];
+      if (!item) {
+        return;
+      }
+      item.duplicateGroupId = clusterIndex + 1;
+      if (indexInCluster > 0) {
+        item.decision = "remove";
+        item.duplicateOfPath = anchor?.filePath ?? null;
+        item.issues = [...item.issues, "redundant"];
+      }
+    });
+  });
+
+  groups.similars.forEach((cluster, clusterIndex) => {
+    cluster.forEach((photoIndex) => {
+      const item = initial[photoIndex];
+      if (item) {
+        item.similarGroupId = clusterIndex + 1;
+      }
+    });
+  });
+
+  const ordered = [...initial].sort(compareForMlsOrder);
+  ordered.forEach((item, index) => {
+    item.recommendedMlsOrder = index + 1;
+
+    const sceneReason = item.sceneTag === "unknown" ? "general support shot" : `${item.sceneTag.replace("-", " ")} coverage`;
+    if (item.decision === "remove") {
+      if (item.duplicateOfPath) {
+        item.recommendationReasons = [`Remove as probable duplicate of ${item.duplicateOfPath}.`];
+      } else {
+        item.recommendationReasons = ["Remove due to low quality risk in hero and gallery contexts."];
+      }
+    } else if (item.decision === "needs-work") {
+      item.recommendationReasons = [
+        `Keep later in sequence for ${sceneReason}.`,
+        "Adjust exposure and sharpness in post before launch."
+      ];
+    } else {
+      item.recommendationReasons = [`Place early for ${sceneReason}.`, "Strong technical candidate for MLS sequencing."];
+    }
+  });
+
+  return ordered;
 }
 
 function parsePrice(listPrice: string): number {
@@ -251,7 +493,7 @@ function parsePrice(listPrice: string): number {
 
 function createMissingShotChecklist(summary: IntakeSummary): string[] {
   const checklist: string[] = [];
-  const observed = new Set(summary.heroCandidates.map((candidate) => candidate.sceneTag));
+  const observed = new Set(summary.photos.map((candidate) => candidate.sceneTag));
 
   if (!observed.has("exterior")) {
     checklist.push("Capture a bright curb-appeal exterior hero shot from street level.");
@@ -279,8 +521,15 @@ function createMissingShotChecklist(summary: IntakeSummary): string[] {
   return checklist;
 }
 
+function topHeroCandidates(photos: PhotoAssessment[]): PhotoAssessment[] {
+  return photos
+    .filter((item) => item.decision !== "remove")
+    .sort((a, b) => b.heroScore - a.heroScore)
+    .slice(0, 5);
+}
+
 export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
-  const { mediaCounts, heroCandidates } = summary;
+  const { mediaCounts, photos } = summary;
   const price = parsePrice(summary.listPrice);
 
   const missingMedia: string[] = [];
@@ -297,6 +546,7 @@ export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
     missingMedia.push("Attach disclosure sheets or room-by-room notes");
   }
 
+  const heroCandidates = topHeroCandidates(photos);
   const photoDepthScore = normalize(mediaCounts.photos, 8, 36);
   const videoScore = mediaCounts.videos > 0 ? 100 : 35;
   const pdfScore = mediaCounts.pdfs > 0 ? 100 : 40;
@@ -306,7 +556,7 @@ export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
     topThree.length > 0 ? Math.round(topThree.reduce((total, item) => total + item.heroScore, 0) / topThree.length) : 0;
 
   const launchReadinessScore = Math.round(
-    photoDepthScore * 0.32 + videoScore * 0.18 + pdfScore * 0.14 + docsScore * 0.11 + heroDepth * 0.25
+    photoDepthScore * 0.3 + videoScore * 0.18 + pdfScore * 0.14 + docsScore * 0.1 + heroDepth * 0.28
   );
 
   const launchReadinessLabel: DirectorReview["launchReadinessLabel"] =
@@ -327,28 +577,25 @@ export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
 
   const topHero = heroCandidates[0];
   const storyAngle = topHero
-    ? `Lead with ${summary.address} as a ${topHero.orientation} visual-first narrative anchored by ${topHero.sceneTag.replace("-", " ")} appeal.`
+    ? `Lead with ${summary.address} using ${topHero.sceneTag.replace("-", " ")} imagery and technical clarity to build instant confidence.`
     : `Position ${summary.address} as a practical, move-in ready opportunity with clear lifestyle benefits.`;
 
   const actionItems: string[] = [];
-  if (heroCandidates.length > 0) {
-    const leadCandidate = heroCandidates[0];
-    if (leadCandidate) {
-      actionItems.push(`Use ${leadCandidate.fileName} as the lead hero candidate (${leadCandidate.heroScore}/100).`);
-    }
-  } else {
-    actionItems.push("Capture bright, high-resolution exterior and main living-room images for hero selection.");
+  if (topHero) {
+    actionItems.push(`Use ${topHero.fileName} as the lead hero image in MLS order #1.`);
   }
-  actionItems.push("Sequence gallery to tell a front-to-back home narrative in under 20 images.");
-  if (mediaCounts.videos < 1) {
-    actionItems.push("Record a 30-60 second walkthrough emphasizing kitchen, living, and primary suite.");
+
+  const removeCount = photos.filter((item) => item.decision === "remove").length;
+  if (removeCount > 0) {
+    actionItems.push(`Remove ${removeCount} duplicate or low-quality photos before launch.`);
   }
-  if (mediaCounts.pdfs < 1) {
-    actionItems.push("Produce a one-page PDF feature sheet with upgrades, utilities, and school highlights.");
+
+  const needsWorkCount = photos.filter((item) => item.decision === "needs-work").length;
+  if (needsWorkCount > 0) {
+    actionItems.push(`Retouch or re-shoot ${needsWorkCount} photos currently marked needs-work.`);
   }
-  if (mediaCounts.documents < 1) {
-    actionItems.push("Add property disclosures and room dimensions to strengthen buyer confidence.");
-  }
+
+  actionItems.push("Follow recommended MLS sequencing for narrative flow from hero exterior to key interiors.");
 
   return {
     storyAngle,
@@ -362,7 +609,7 @@ export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
 }
 
 export function createTextReport(summary: IntakeSummary, review: DirectorReview): string {
-  const topCandidates = summary.heroCandidates.slice(0, 5);
+  const topCandidates = topHeroCandidates(summary.photos);
 
   const lines: string[] = [
     "Director Intake Report",
@@ -407,18 +654,25 @@ export function createTextReport(summary: IntakeSummary, review: DirectorReview)
   }
 
   lines.push("", "Action Items", "------------", ...review.actionItems.map((item, index) => `${index + 1}. ${item}`));
-
   lines.push("", "Top Hero Candidates", "-------------------");
+
   if (topCandidates.length === 0) {
     lines.push("No photo candidates analyzed.");
   } else {
     lines.push(
       ...topCandidates.map(
         (candidate, index) =>
-          `${index + 1}. ${candidate.fileName} | Score ${candidate.heroScore} | ${candidate.sceneTag} | Reasons: ${candidate.reasons.join("; ")}`
+          `${index + 1}. ${candidate.fileName} | Score ${candidate.heroScore} | ${candidate.sceneTag} | ${candidate.recommendationReasons.join(" ")}`
       )
     );
   }
+
+  lines.push("", "Recommended MLS Order", "---------------------");
+  lines.push(
+    ...summary.photos.map(
+      (photo) => `${photo.recommendedMlsOrder}. ${photo.fileName} [${photo.decision}] - ${photo.recommendationReasons.join(" ")}`
+    )
+  );
 
   return `${lines.join("\n")}\n`;
 }
