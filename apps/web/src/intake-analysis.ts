@@ -1,5 +1,6 @@
 export interface FileDescriptor {
   name: string;
+  path?: string;
   type?: string;
   size?: number;
 }
@@ -12,8 +13,19 @@ export interface MediaCounts {
   other: number;
 }
 
+export type SceneTag =
+  | "exterior"
+  | "backyard"
+  | "kitchen"
+  | "primary-bedroom"
+  | "bathroom"
+  | "interior"
+  | "unknown";
+
 export interface PhotoMetrics {
   fileName: string;
+  filePath: string;
+  thumbnailUrl: string;
   width: number;
   height: number;
   brightness: number;
@@ -24,14 +36,22 @@ export interface PhotoMetrics {
 
 export interface HeroCandidate extends PhotoMetrics {
   orientation: "landscape" | "portrait" | "square";
+  sceneTag: SceneTag;
+  brightnessScore: number;
+  sharpnessScore: number;
+  resolutionScore: number;
+  aspectRatioScore: number;
+  contrastScore: number;
+  saturationScore: number;
   heroScore: number;
-  notes: string[];
+  reasons: string[];
 }
 
 export interface DirectorReview {
   storyAngle: string;
   buyerAngle: string;
   missingMedia: string[];
+  missingShotChecklist: string[];
   actionItems: string[];
   launchReadinessScore: number;
   launchReadinessLabel: "Not Ready" | "Needs Work" | "Almost Ready" | "Launch Ready";
@@ -40,6 +60,7 @@ export interface DirectorReview {
 export interface IntakeSummary {
   address: string;
   listPrice: string;
+  fileCount: number;
   mediaCounts: MediaCounts;
   heroCandidates: HeroCandidate[];
   generatedAt: string;
@@ -49,12 +70,25 @@ const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "heic", "heif", 
 const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "m4v", "avi", "mkv", "webm"]);
 const DOCUMENT_EXTENSIONS = new Set(["doc", "docx", "txt", "rtf", "xlsx", "csv", "ppt", "pptx"]);
 
+const SCENE_KEYWORDS: Array<{ tag: SceneTag; terms: string[] }> = [
+  { tag: "exterior", terms: ["front", "exterior", "facade", "curb", "driveway", "elevation", "aerial"] },
+  { tag: "backyard", terms: ["backyard", "back-yard", "patio", "deck", "pool", "garden", "yard", "lawn"] },
+  { tag: "kitchen", terms: ["kitchen", "island", "pantry"] },
+  { tag: "bathroom", terms: ["bath", "bathroom", "ensuite", "vanity", "shower", "tub"] },
+  { tag: "primary-bedroom", terms: ["primary", "master", "bedroom"] },
+];
+
 function getExtension(fileName: string): string {
   const segments = fileName.toLowerCase().split(".");
   if (segments.length < 2) {
     return "";
   }
   return segments[segments.length - 1] ?? "";
+}
+
+export function isImageDescriptor(file: FileDescriptor): boolean {
+  const extension = getExtension(file.name);
+  return (file.type ?? "").startsWith("image/") || IMAGE_EXTENSIONS.has(extension);
 }
 
 export function classifyMedia(files: FileDescriptor[]): MediaCounts {
@@ -112,6 +146,40 @@ function scoreBrightness(brightness: number): number {
   return Math.round((1 - distance / 0.56) * 100);
 }
 
+function scoreAspectRatio(width: number, height: number): number {
+  if (height === 0) {
+    return 0;
+  }
+  const ratio = width / height;
+  const target = 1.5;
+  const distance = Math.min(Math.abs(ratio - target), 1.5);
+  return Math.round((1 - distance / 1.5) * 100);
+}
+
+function inferSceneTag(photo: PhotoMetrics): SceneTag {
+  const text = `${photo.fileName} ${photo.filePath}`.toLowerCase();
+  for (const scene of SCENE_KEYWORDS) {
+    if (scene.terms.some((term) => text.includes(term))) {
+      return scene.tag;
+    }
+  }
+
+  const orientation = photo.width > photo.height ? "landscape" : photo.width < photo.height ? "portrait" : "square";
+  if (orientation === "landscape" && photo.brightness > 0.5 && photo.saturation > 0.2) {
+    return "exterior";
+  }
+  if (orientation === "portrait" && photo.brightness < 0.45) {
+    return "primary-bedroom";
+  }
+  if (photo.saturation < 0.15 && photo.contrast < 0.11) {
+    return "bathroom";
+  }
+  if (photo.saturation > 0.25 && photo.contrast > 0.12) {
+    return "interior";
+  }
+  return "unknown";
+}
+
 export function rankHeroCandidates(metrics: PhotoMetrics[]): HeroCandidate[] {
   return metrics
     .map((photo) => {
@@ -123,42 +191,51 @@ export function rankHeroCandidates(metrics: PhotoMetrics[]): HeroCandidate[] {
       const contrastScore = normalize(photo.contrast, 0.06, 0.24);
       const brightnessScore = scoreBrightness(photo.brightness);
       const saturationScore = normalize(photo.saturation, 0.12, 0.5);
-      const orientationBonus = orientation === "landscape" ? 8 : orientation === "square" ? 3 : 0;
+      const aspectRatioScore = scoreAspectRatio(photo.width, photo.height);
+      const orientationBonus = orientation === "landscape" ? 6 : orientation === "square" ? 2 : 0;
 
       const heroScore = Math.round(
-        resolutionScore * 0.3 +
-          sharpnessScore * 0.2 +
-          contrastScore * 0.18 +
-          brightnessScore * 0.2 +
-          saturationScore * 0.12 +
+        resolutionScore * 0.24 +
+          sharpnessScore * 0.24 +
+          contrastScore * 0.12 +
+          brightnessScore * 0.17 +
+          saturationScore * 0.08 +
+          aspectRatioScore * 0.15 +
           orientationBonus
       );
 
-      const notes: string[] = [];
+      const reasons: string[] = [];
       if (heroScore >= 85) {
-        notes.push("Strong hero candidate");
+        reasons.push("Strong overall technical quality");
       }
-      if (resolutionScore < 50) {
-        notes.push("Low resolution");
+      if (resolutionScore >= 70) {
+        reasons.push("High enough resolution for launch hero usage");
       }
       if (sharpnessScore < 45) {
-        notes.push("Soft focus");
+        reasons.push("Soft focus risk in key details");
       }
       if (brightnessScore < 45) {
-        notes.push("Exposure imbalance");
+        reasons.push("Exposure may need correction");
       }
-      if (saturationScore < 35) {
-        notes.push("Muted color depth");
+      if (aspectRatioScore < 45) {
+        reasons.push("Aspect ratio is less ideal for portal hero slots");
       }
-      if (notes.length === 0) {
-        notes.push("Balanced composition and clarity");
+      if (reasons.length === 0) {
+        reasons.push("Balanced candidate for primary placement");
       }
 
       return {
         ...photo,
         orientation,
+        sceneTag: inferSceneTag(photo),
+        brightnessScore,
+        sharpnessScore,
+        resolutionScore,
+        aspectRatioScore,
+        contrastScore,
+        saturationScore,
         heroScore: Math.max(1, Math.min(100, heroScore)),
-        notes
+        reasons
       };
     })
     .sort((a, b) => b.heroScore - a.heroScore);
@@ -170,6 +247,36 @@ function parsePrice(listPrice: string): number {
     return 0;
   }
   return parsed;
+}
+
+function createMissingShotChecklist(summary: IntakeSummary): string[] {
+  const checklist: string[] = [];
+  const observed = new Set(summary.heroCandidates.map((candidate) => candidate.sceneTag));
+
+  if (!observed.has("exterior")) {
+    checklist.push("Capture a bright curb-appeal exterior hero shot from street level.");
+  }
+  if (!observed.has("backyard")) {
+    checklist.push("Add at least one backyard or patio lifestyle composition.");
+  }
+  if (!observed.has("kitchen")) {
+    checklist.push("Shoot a wide kitchen frame including counters and island if present.");
+  }
+  if (!observed.has("primary-bedroom")) {
+    checklist.push("Include a primary bedroom shot that shows depth and natural light.");
+  }
+  if (!observed.has("bathroom")) {
+    checklist.push("Add a clean bathroom image that shows vanity and shower or tub context.");
+  }
+
+  if (summary.mediaCounts.videos < 1) {
+    checklist.push("Record one vertical teaser or walkthrough clip under 60 seconds.");
+  }
+  if (summary.mediaCounts.pdfs < 1) {
+    checklist.push("Create a one-page feature PDF for buyer handoff and agent follow-up.");
+  }
+
+  return checklist;
 }
 
 export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
@@ -199,7 +306,7 @@ export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
     topThree.length > 0 ? Math.round(topThree.reduce((total, item) => total + item.heroScore, 0) / topThree.length) : 0;
 
   const launchReadinessScore = Math.round(
-    photoDepthScore * 0.35 + videoScore * 0.2 + pdfScore * 0.15 + docsScore * 0.1 + heroDepth * 0.2
+    photoDepthScore * 0.32 + videoScore * 0.18 + pdfScore * 0.14 + docsScore * 0.11 + heroDepth * 0.25
   );
 
   const launchReadinessLabel: DirectorReview["launchReadinessLabel"] =
@@ -220,14 +327,14 @@ export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
 
   const topHero = heroCandidates[0];
   const storyAngle = topHero
-    ? `Lead with ${summary.address} as a ${topHero.orientation} visual-first story emphasizing light, flow, and room-to-room continuity.`
+    ? `Lead with ${summary.address} as a ${topHero.orientation} visual-first narrative anchored by ${topHero.sceneTag.replace("-", " ")} appeal.`
     : `Position ${summary.address} as a practical, move-in ready opportunity with clear lifestyle benefits.`;
 
   const actionItems: string[] = [];
   if (heroCandidates.length > 0) {
     const leadCandidate = heroCandidates[0];
     if (leadCandidate) {
-      actionItems.push(`Use ${leadCandidate.fileName} as primary hero candidate in launch package.`);
+      actionItems.push(`Use ${leadCandidate.fileName} as the lead hero candidate (${leadCandidate.heroScore}/100).`);
     }
   } else {
     actionItems.push("Capture bright, high-resolution exterior and main living-room images for hero selection.");
@@ -247,6 +354,7 @@ export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
     storyAngle,
     buyerAngle,
     missingMedia,
+    missingShotChecklist: createMissingShotChecklist(summary),
     actionItems,
     launchReadinessScore,
     launchReadinessLabel
@@ -262,6 +370,7 @@ export function createTextReport(summary: IntakeSummary, review: DirectorReview)
     `Generated: ${summary.generatedAt}`,
     `Address: ${summary.address}`,
     `List Price: ${summary.listPrice}`,
+    `Files Analyzed: ${summary.fileCount}`,
     "",
     "Media Inventory",
     "---------------",
@@ -290,6 +399,13 @@ export function createTextReport(summary: IntakeSummary, review: DirectorReview)
     lines.push(...review.missingMedia.map((item, index) => `${index + 1}. ${item}`));
   }
 
+  lines.push("", "Missing Shot Checklist", "----------------------");
+  if (review.missingShotChecklist.length === 0) {
+    lines.push("No critical missing shots detected.");
+  } else {
+    lines.push(...review.missingShotChecklist.map((item, index) => `${index + 1}. ${item}`));
+  }
+
   lines.push("", "Action Items", "------------", ...review.actionItems.map((item, index) => `${index + 1}. ${item}`));
 
   lines.push("", "Top Hero Candidates", "-------------------");
@@ -299,7 +415,7 @@ export function createTextReport(summary: IntakeSummary, review: DirectorReview)
     lines.push(
       ...topCandidates.map(
         (candidate, index) =>
-          `${index + 1}. ${candidate.fileName} | Score ${candidate.heroScore} | ${candidate.orientation} | ${candidate.notes.join("; ")}`
+          `${index + 1}. ${candidate.fileName} | Score ${candidate.heroScore} | ${candidate.sceneTag} | Reasons: ${candidate.reasons.join("; ")}`
       )
     );
   }
