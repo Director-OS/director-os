@@ -20,6 +20,7 @@ function baseProject(): DirectorProject {
     uploadHistory: [],
     media: [],
     overrides: {},
+    activity: [],
     latestSummary: null,
     latestReview: null,
     newSinceLastAnalysis: 0,

@@ -42,12 +42,58 @@
       <button id="analyzeBtn" disabled>Import accepted files</button>
     </section>
 
-    <section id="inboxCard" class="card hidden">
+    <section id="workspaceShell" class="card">
+      <div class="workspace-layout">
+        <nav id="workspaceNav" class="workspace-nav">
+          <button type="button" class="active-project" data-workspace-view="overview">Overview</button>
+          <button type="button" data-workspace-view="inbox">Inbox</button>
+          <button type="button" data-workspace-view="photos">Photos</button>
+          <button type="button" data-workspace-view="drone">Drone</button>
+          <button type="button" data-workspace-view="video">Video</button>
+          <button type="button" data-workspace-view="floor-plans">Floor Plans</button>
+          <button type="button" data-workspace-view="tour">3D Tour</button>
+          <button type="button" data-workspace-view="documents">Documents</button>
+          <button type="button" data-workspace-view="marketing">Marketing</button>
+          <button type="button" data-workspace-view="mls">MLS</button>
+          <button type="button" data-workspace-view="activity">Activity</button>
+          <button type="button" data-workspace-view="director-review">Director Review</button>
+        </nav>
+        <p class="workspace-hint">Permanent listing workspace with sectioned media operations and director controls.</p>
+      </div>
+    </section>
+
+    <section id="inboxCard" class="card hidden" data-workspace-panel="inbox">
       <div class="section-head">
         <div>
           <h2>Director Inbox</h2>
           <p id="inboxSummary">No files queued</p>
         </div>
+        <div class="button-row">
+          <button id="batchAcceptBtn" type="button" class="secondary">Batch Accept</button>
+          <button id="batchRejectBtn" type="button" class="secondary">Batch Reject</button>
+        </div>
+      </div>
+      <div class="inbox-controls">
+        <input id="inboxSearch" type="text" placeholder="Search by file name or path" />
+        <select id="inboxKindFilter">
+          <option value="all">All media types</option>
+          <option value="raw">RAW</option>
+          <option value="edited">Edited</option>
+          <option value="drone">Drone</option>
+          <option value="video">Video</option>
+          <option value="floor-plan">Floor plans</option>
+          <option value="matterport">Matterport</option>
+          <option value="brochure">Brochure</option>
+          <option value="contract">Contract</option>
+          <option value="document">Document</option>
+          <option value="unknown">Unknown</option>
+        </select>
+        <select id="inboxDecisionFilter">
+          <option value="all">All decisions</option>
+          <option value="accept">Accept</option>
+          <option value="reject">Reject</option>
+          <option value="ignore">Ignore</option>
+        </select>
       </div>
       <div id="inboxTable" class="inbox-table"></div>
     </section>
@@ -59,7 +105,7 @@
     </section>
 
     <section id="results" class="hidden">
-      <article class="card executive-card">
+      <article class="card executive-card" data-workspace-panel="overview">
         <div class="section-head">
           <div>
             <h2>Executive Summary</h2>
@@ -88,7 +134,7 @@
         </div>
       </article>
 
-      <article class="card">
+      <article class="card" data-workspace-panel="overview">
         <div class="section-head">
           <div>
             <h2>Project Status</h2>
@@ -107,7 +153,7 @@
         <ul id="uploadHistory"></ul>
       </article>
 
-      <div class="score-grid">
+      <div class="score-grid" data-workspace-panel="marketing">
         <article class="card score-card"><span>Launch readiness</span><strong id="launchScore">-</strong><small id="launchLabel">-</small></article>
         <article class="card score-card"><span>Total files</span><strong id="fileCount">0</strong><small>All selected files analyzed</small></article>
         <article class="card score-card"><span>Photos</span><strong id="photoCount">0</strong><small>Images</small></article>
@@ -120,7 +166,7 @@
         <article class="card score-card"><span>Remove</span><strong id="removeCount">0</strong><small>Duplicates or low quality</small></article>
       </div>
 
-      <div class="two-col">
+      <div class="two-col" data-workspace-panel="director-review">
         <article class="card">
           <h2>Director Review</h2>
           <dl>
@@ -139,7 +185,7 @@
         </article>
       </div>
 
-      <article class="card">
+      <article class="card" data-workspace-panel="marketing">
         <div class="section-head">
           <div>
             <h2>Top 5 Hero Candidates</h2>
@@ -153,7 +199,7 @@
         <ul id="heroTop5" class="hero-list"></ul>
       </article>
 
-      <article class="card">
+      <article class="card" data-workspace-panel="photos">
         <div class="section-head">
           <div>
             <h2>Photo Quality and Sequencing</h2>
@@ -167,6 +213,78 @@
           </div>
         </div>
         <div id="photoTable" class="photo-table"></div>
+      </article>
+
+      <article class="card" data-workspace-panel="overview">
+        <h2>Workspace Overview</h2>
+        <dl class="overview-grid">
+          <div><dt>Property</dt><dd id="overviewAddress">-</dd></div>
+          <div><dt>List Price</dt><dd id="overviewPrice">-</dd></div>
+          <div><dt>Launch Status</dt><dd id="overviewLaunch">-</dd></div>
+          <div><dt>Director Confidence</dt><dd id="overviewConfidence">0%</dd></div>
+          <div><dt>Last Activity</dt><dd id="overviewLastActivity">-</dd></div>
+        </dl>
+        <h3>Missing Items</h3>
+        <ul id="overviewMissing"></ul>
+        <h3>Next Action</h3>
+        <p id="overviewNextAction">-</p>
+      </article>
+
+      <article class="card" data-workspace-panel="photos">
+        <div class="section-head">
+          <div>
+            <h2>Photo Workspace</h2>
+            <p>Review thumbnails, set image flags, and reorder MLS ranking with drag and drop.</p>
+          </div>
+        </div>
+        <div class="photo-workspace">
+          <div id="photoGrid" class="photo-grid"></div>
+          <div id="photoDetail" class="photo-detail"></div>
+          <div>
+            <h3>Manual Ranking</h3>
+            <ul id="rankList" class="rank-list"></ul>
+          </div>
+        </div>
+      </article>
+
+      <article class="card" data-workspace-panel="drone">
+        <h2>Drone Workspace</h2>
+        <p>Drone assets detected: <strong id="droneCount">0</strong></p>
+      </article>
+
+      <article class="card" data-workspace-panel="video">
+        <h2>Video Workspace</h2>
+        <p>Video assets detected: <strong id="videoWorkspaceCount">0</strong></p>
+      </article>
+
+      <article class="card" data-workspace-panel="floor-plans">
+        <h2>Floor Plan Workspace</h2>
+        <p>Floor plan assets detected: <strong id="floorPlanCount">0</strong></p>
+      </article>
+
+      <article class="card" data-workspace-panel="tour">
+        <h2>3D Tour Workspace</h2>
+        <p>Tour assets detected: <strong id="tourCount">0</strong></p>
+      </article>
+
+      <article class="card" data-workspace-panel="documents">
+        <h2>Document Workspace</h2>
+        <p>Documents detected: <strong id="documentWorkspaceCount">0</strong></p>
+      </article>
+
+      <article class="card" data-workspace-panel="mls">
+        <h2>MLS Workspace</h2>
+        <p>Photos tagged ready for MLS: <strong id="mlsReadyPhotos">0</strong></p>
+      </article>
+
+      <article class="card" data-workspace-panel="activity">
+        <h2>Activity Feed</h2>
+        <ul id="activityFeed"></ul>
+      </article>
+
+      <article class="card" data-workspace-panel="director-review">
+        <h2>Director Conversation</h2>
+        <div id="directorConversation" class="director-conversation"></div>
       </article>
     </section>
   </main>

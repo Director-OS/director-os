@@ -23,6 +23,7 @@ import {
   loadProject,
   mergeAssessmentsWithHistory,
   projectSummaryFromStored,
+  pushProjectActivity,
   saveProject,
   syncUploadIntoProject,
   updateMediaMetrics,
@@ -37,11 +38,46 @@ import {
 } from "./inbox.js";
 
 type FilterTag = "all" | "recommended" | "needs-work" | "remove";
+type WorkspaceView =
+  | "overview"
+  | "inbox"
+  | "photos"
+  | "drone"
+  | "video"
+  | "floor-plans"
+  | "tour"
+  | "documents"
+  | "marketing"
+  | "mls"
+  | "activity"
+  | "director-review";
+
+const WORKSPACE_VIEWS: WorkspaceView[] = [
+  "overview",
+  "inbox",
+  "photos",
+  "drone",
+  "video",
+  "floor-plans",
+  "tour",
+  "documents",
+  "marketing",
+  "mls",
+  "activity",
+  "director-review"
+];
+
+type PhotoFlagKey = "rankLocked" | "favorite" | "hero" | "needsEditing" | "readyForMls";
 
 interface PhotoOverride {
   sceneTag?: SceneTag;
   decision?: DecisionTag;
   rank?: number;
+  rankLocked?: boolean;
+  favorite?: boolean;
+  hero?: boolean;
+  needsEditing?: boolean;
+  readyForMls?: boolean;
 }
 
 interface AppState {
@@ -54,6 +90,11 @@ interface AppState {
   currentProjectId: string | null;
   projects: DirectorProject[];
   pendingReplacePath: string | null;
+  currentView: WorkspaceView;
+  inboxSearch: string;
+  inboxKindFilter: string;
+  inboxDecisionFilter: string;
+  selectedPhotoPath: string | null;
 }
 
 const state: AppState = {
@@ -65,7 +106,12 @@ const state: AppState = {
   overrides: {},
   currentProjectId: null,
   projects: [],
-  pendingReplacePath: null
+  pendingReplacePath: null,
+  currentView: "overview",
+  inboxSearch: "",
+  inboxKindFilter: "all",
+  inboxDecisionFilter: "all",
+  selectedPhotoPath: null
 };
 
 function toMetricClass(value: number): "good" | "warn" | "bad" {
@@ -356,6 +402,216 @@ function renderProjectStatus(): void {
   );
 }
 
+function directorConfidence(summary: IntakeSummary | null): number {
+  if (!summary || summary.photos.length === 0) {
+    return 0;
+  }
+  const avg = Math.round(summary.photos.reduce((total, photo) => total + photo.heroScore, 0) / summary.photos.length);
+  return Math.max(0, Math.min(100, Math.round(avg * 0.8 + summary.mediaCounts.photos * 0.5)));
+}
+
+function projectLastActivity(project: DirectorProject | null): string {
+  if (!project || project.activity.length === 0) {
+    return "No activity yet.";
+  }
+  const latest = project.activity[0];
+  return `${new Date(latest?.at ?? "").toLocaleString()} - ${latest?.message ?? ""}`;
+}
+
+function renderOverviewWorkspace(): void {
+  const project = currentProject();
+  const summary = state.summary;
+  const review = summary ? buildDirectorReview(summary) : null;
+
+  setText("overviewAddress", project?.address ?? "-");
+  setText("overviewPrice", project?.listPrice ?? "-");
+  setText("overviewLaunch", review ? `${review.launchReadinessScore}/100 (${review.launchReadinessLabel})` : "-");
+  setText("overviewConfidence", `${directorConfidence(summary)}%`);
+  setText("overviewLastActivity", projectLastActivity(project));
+
+  const missingItems: string[] = [];
+  if (review) {
+    missingItems.push(...review.missingMedia.slice(0, 4));
+    missingItems.push(...review.missingShotChecklist.slice(0, 4));
+  }
+  updateList("overviewMissing", missingItems, "No missing items detected.");
+
+  const nextAction =
+    review?.actionItems[0] ??
+    (state.inboxItems.some((item) => item.decision === "accept")
+      ? "Import accepted Inbox files into this workspace."
+      : "Import media into Inbox to continue workspace analysis.");
+  setText("overviewNextAction", nextAction);
+}
+
+function renderActivityFeed(): void {
+  const project = currentProject();
+  const list = document.getElementById("activityFeed");
+  if (!list) {
+    return;
+  }
+
+  const items = project?.activity ?? [];
+  list.innerHTML = "";
+  if (items.length === 0) {
+    const li = document.createElement("li");
+    li.textContent = "No activity yet.";
+    list.appendChild(li);
+    return;
+  }
+
+  for (const item of items.slice(0, 50)) {
+    const li = document.createElement("li");
+    li.textContent = `${new Date(item.at).toLocaleString()} | ${item.type} | ${item.message}`;
+    list.appendChild(li);
+  }
+}
+
+function renderAssetPanels(): void {
+  const project = currentProject();
+  if (!project) {
+    setText("droneCount", "0");
+    setText("videoWorkspaceCount", "0");
+    setText("floorPlanCount", "0");
+    setText("tourCount", "0");
+    setText("documentWorkspaceCount", "0");
+    setText("mlsReadyPhotos", "0");
+    return;
+  }
+
+  const media = activeMedia(project);
+  const byName = (needle: string) => media.filter((item) => item.fileName.toLowerCase().includes(needle));
+  const drone = byName("drone").length + byName("aerial").length;
+  const floorPlans = byName("floorplan").length + byName("floor-plan").length + byName("plan").length;
+  const tours = byName("matterport").length + byName("tour").length;
+  const docs = media.filter((item) => ["pdf", "doc", "docx", "txt", "rtf"].some((ext) => item.fileName.toLowerCase().endsWith(`.${ext}`))).length;
+  const videos = media.filter((item) => ["mp4", "mov", "m4v", "avi", "mkv", "webm"].some((ext) => item.fileName.toLowerCase().endsWith(`.${ext}`))).length;
+  const readyForMls = Object.entries(state.overrides).filter(([, value]) => Boolean(value.readyForMls)).length;
+
+  setText("droneCount", `${drone}`);
+  setText("videoWorkspaceCount", `${videos}`);
+  setText("floorPlanCount", `${floorPlans}`);
+  setText("tourCount", `${tours}`);
+  setText("documentWorkspaceCount", `${docs}`);
+  setText("mlsReadyPhotos", `${readyForMls}`);
+}
+
+function saveOverrideAndActivity(path: string, patch: PhotoOverride, message: string): void {
+  const current = state.overrides[path] ?? {};
+  state.overrides[path] = {
+    ...current,
+    ...patch
+  };
+
+  const project = currentProject();
+  if (project) {
+    let nextProject = {
+      ...project,
+      overrides: {
+        ...project.overrides,
+        [path]: state.overrides[path]
+      }
+    };
+    nextProject = pushProjectActivity(nextProject, {
+      type: "override",
+      message
+    });
+    saveProject(nextProject);
+    renderProjectDashboard();
+  }
+}
+
+function setWorkspaceView(view: WorkspaceView): void {
+  state.currentView = view;
+  const sections = document.querySelectorAll<HTMLElement>("[data-workspace-panel]");
+  sections.forEach((panel) => {
+    if (panel.dataset.workspacePanel === view) {
+      panel.classList.remove("hidden");
+    } else {
+      panel.classList.add("hidden");
+    }
+  });
+
+  const navButtons = document.querySelectorAll<HTMLButtonElement>("[data-workspace-view]");
+  navButtons.forEach((button) => {
+    button.classList.toggle("active-project", button.dataset.workspaceView === view);
+  });
+}
+
+function photoOverride(path: string): PhotoOverride {
+  return state.overrides[path] ?? {};
+}
+
+function renderPhotoWorkspace(): void {
+  const grid = document.getElementById("photoGrid");
+  const detail = document.getElementById("photoDetail");
+  const rankList = document.getElementById("rankList");
+  if (!grid || !detail || !rankList) {
+    return;
+  }
+
+  const photos = [...effectivePhotos()].sort((a, b) => a.recommendedMlsOrder - b.recommendedMlsOrder);
+  if (photos.length === 0) {
+    grid.innerHTML = "<p>No photos in this workspace yet.</p>";
+    detail.innerHTML = "<p>Select a photo to see details.</p>";
+    rankList.innerHTML = "";
+    return;
+  }
+
+  if (!state.selectedPhotoPath || !photos.some((photo) => photo.filePath === state.selectedPhotoPath)) {
+    state.selectedPhotoPath = photos[0]?.filePath ?? null;
+  }
+
+  grid.innerHTML = photos
+    .map((photo) => {
+      const meta = photoOverride(photo.filePath);
+      const badges = [
+        meta.favorite ? "favorite" : "",
+        meta.hero ? "hero" : "",
+        meta.needsEditing ? "needs editing" : "",
+        meta.readyForMls ? "ready for mls" : ""
+      ]
+        .filter(Boolean)
+        .join(" | ");
+      return `<button type="button" class="photo-tile ${state.selectedPhotoPath === photo.filePath ? "active-project" : ""}" data-photo-select="${photo.filePath}">
+        <img src="${photo.thumbnailUrl}" alt="${photo.fileName}" />
+        <strong>${photo.fileName}</strong>
+        <small>#${photo.recommendedMlsOrder} | score ${photo.heroScore}</small>
+        <small>${badges || "no tags"}</small>
+      </button>`;
+    })
+    .join("");
+
+  const selected = photos.find((photo) => photo.filePath === state.selectedPhotoPath) ?? photos[0];
+  if (!selected) {
+    return;
+  }
+
+  const selectedMeta = photoOverride(selected.filePath);
+  detail.innerHTML = `<div class="photo-detail-card">
+    <img src="${selected.thumbnailUrl}" alt="${selected.fileName}" />
+    <h3>${selected.fileName}</h3>
+    <p>Current ranking: #${selected.recommendedMlsOrder}</p>
+    <p>Scene: ${prettySceneTag(selected.sceneTag)} | Decision: ${selected.decision}</p>
+    <div class="toggle-grid">
+      <label><input type="checkbox" data-photo-flag="rankLocked" ${selectedMeta.rankLocked ? "checked" : ""} data-path="${selected.filePath}" /> Lock ranking</label>
+      <label><input type="checkbox" data-photo-flag="favorite" ${selectedMeta.favorite ? "checked" : ""} data-path="${selected.filePath}" /> Favorite</label>
+      <label><input type="checkbox" data-photo-flag="hero" ${selectedMeta.hero ? "checked" : ""} data-path="${selected.filePath}" /> Hero designation</label>
+      <label><input type="checkbox" data-photo-flag="needsEditing" ${selectedMeta.needsEditing ? "checked" : ""} data-path="${selected.filePath}" /> Needs Editing</label>
+      <label><input type="checkbox" data-photo-flag="readyForMls" ${selectedMeta.readyForMls ? "checked" : ""} data-path="${selected.filePath}" /> Ready for MLS</label>
+    </div>
+  </div>`;
+
+  rankList.innerHTML = photos
+    .map((photo) => {
+      const meta = photoOverride(photo.filePath);
+      const lock = meta.rankLocked ? "locked" : "";
+      const draggable = meta.rankLocked ? "false" : "true";
+      return `<li class="rank-item ${lock}" draggable="${draggable}" data-rank-path="${photo.filePath}">#${photo.recommendedMlsOrder} ${photo.fileName}</li>`;
+    })
+    .join("");
+}
+
 function triggerDownload(fileName: string, mimeType: string, content: string): void {
   const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
@@ -368,6 +624,44 @@ function triggerDownload(fileName: string, mimeType: string, content: string): v
 
 function prettyInboxKind(kind: string): string {
   return kind.replace(/-/g, " ");
+}
+
+function isWorkspaceView(value: string): value is WorkspaceView {
+  return WORKSPACE_VIEWS.includes(value as WorkspaceView);
+}
+
+function isPhotoFlagKey(value: string): value is PhotoFlagKey {
+  return value === "rankLocked" || value === "favorite" || value === "hero" || value === "needsEditing" || value === "readyForMls";
+}
+
+function visibleInboxItems(): InboxItem[] {
+  const query = state.inboxSearch.trim().toLowerCase();
+  return state.inboxItems.filter((item) => {
+    if (state.inboxKindFilter !== "all" && item.kind !== state.inboxKindFilter) {
+      return false;
+    }
+    if (state.inboxDecisionFilter !== "all" && item.decision !== state.inboxDecisionFilter) {
+      return false;
+    }
+    if (!query) {
+      return true;
+    }
+    return item.fileName.toLowerCase().includes(query) || item.filePath.toLowerCase().includes(query);
+  });
+}
+
+function applyBatchInboxDecision(decision: InboxDecision): void {
+  const visibleIds = new Set(visibleInboxItems().map((item) => item.id));
+  state.inboxItems = state.inboxItems.map((item) => {
+    if (!visibleIds.has(item.id) || item.locked) {
+      return item;
+    }
+    return {
+      ...item,
+      decision
+    };
+  });
+  renderInbox();
 }
 
 function renderInbox(): void {
@@ -394,13 +688,14 @@ function renderInbox(): void {
   const rejectedCount = state.inboxItems.filter((item) => item.decision === "reject").length;
   const ignoredCount = state.inboxItems.filter((item) => item.decision === "ignore").length;
   const counts = classifyCounts(state.inboxItems);
+  const visible = visibleInboxItems();
 
   setText(
     "inboxSummary",
-    `Accepted ${acceptedCount} | Rejected ${rejectedCount} | Ignored ${ignoredCount} | RAW ${counts.raw} | Edited ${counts.edited} | Drone ${counts.drone} | Video ${counts.video} | Floor plans ${counts["floor-plan"]} | Matterport ${counts.matterport} | Brochures ${counts.brochure} | Unknown ${counts.unknown}`
+    `Visible ${visible.length} | Accepted ${acceptedCount} | Rejected ${rejectedCount} | Ignored ${ignoredCount} | RAW ${counts.raw} | Edited ${counts.edited} | Drone ${counts.drone} | Video ${counts.video} | Floor plans ${counts["floor-plan"]} | Matterport ${counts.matterport} | Brochures ${counts.brochure} | Unknown ${counts.unknown}`
   );
 
-  const rows = state.inboxItems
+  const rows = visible
     .map((item) => {
       const lock = item.locked ? "disabled" : "";
       const already = item.alreadyAnalyzed ? "already analyzed" : "new";
@@ -503,7 +798,14 @@ function renderTopFive(photos: PhotoAssessment[]): void {
 
   const top = [...photos]
     .filter((photo) => photo.decision !== "remove")
-    .sort((a, b) => b.heroScore - a.heroScore)
+    .sort((a, b) => {
+      const aHero = photoOverride(a.filePath).hero ? 1 : 0;
+      const bHero = photoOverride(b.filePath).hero ? 1 : 0;
+      if (aHero !== bHero) {
+        return bHero - aHero;
+      }
+      return b.heroScore - a.heroScore;
+    })
     .slice(0, 5);
 
   list.innerHTML = "";
@@ -679,6 +981,10 @@ function updateDashboardFromState(): void {
   setText("needsWorkCount", `${photos.filter((photo) => photo.decision === "needs-work").length}`);
   setText("removeCount", `${photos.filter((photo) => photo.decision === "remove").length}`);
   renderProjectStatus();
+  renderOverviewWorkspace();
+  renderActivityFeed();
+  renderPhotoWorkspace();
+  renderAssetPanels();
 }
 
 function renderExecutiveSummary(review: DirectorReview): void {
@@ -688,6 +994,33 @@ function renderExecutiveSummary(review: DirectorReview): void {
   updateList("execStrengths", exec.strengths, "No strengths identified yet.");
   updateList("execWeaknesses", exec.weaknesses, "No weaknesses identified yet.");
   updateList("execMissingShots", exec.missingShots, "No missing shots identified.");
+}
+
+function renderDirectorConversation(summary: IntakeSummary, review: DirectorReview): void {
+  const panel = document.getElementById("directorConversation");
+  if (!panel) {
+    return;
+  }
+
+  const top = [...summary.photos].sort((a, b) => b.heroScore - a.heroScore)[0];
+  const laundryMissing = review.missingShotChecklist.some((item) => item.toLowerCase().includes("laundry"));
+  const lines: string[] = [];
+
+  if (top) {
+    lines.push(`I recommend leading with ${top.fileName}; it is currently your strongest hero candidate.`);
+  }
+  lines.push(`The kitchen sequence is ${summary.photos.some((item) => item.sceneTag === "kitchen") ? "excellent" : "still missing"}.`);
+  if (laundryMissing) {
+    lines.push("You are still missing a laundry room photo.");
+  }
+  lines.push(`This listing is ${review.launchReadinessScore}% launch ready.`);
+
+  panel.innerHTML = lines
+    .map(
+      (line, index) =>
+        `<div class="director-line"><p>${line}</p><button type="button" class="secondary accept-recommendation" data-rec-index="${index}" data-message="${line.replace(/"/g, "&quot;")}">Accept Recommendation</button></div>`
+    )
+    .join("");
 }
 
 function renderResults(summary: IntakeSummary): void {
@@ -721,6 +1054,7 @@ function renderResults(summary: IntakeSummary): void {
   setText("angle", review.buyerAngle);
   setText("runtime", summary.mediaCounts.videos > 0 ? "30-60 second highlight cut" : "Capture teaser before launch");
   renderExecutiveSummary(review);
+  renderDirectorConversation(summary, review);
 
   updateList("missingMedia", review.missingMedia, "No missing media detected.");
   updateList("shotChecklist", review.missingShotChecklist, "No critical missing shot detected.");
@@ -749,6 +1083,7 @@ function renderResults(summary: IntakeSummary): void {
   updateDashboardFromState();
   renderProjectDashboard();
   renderProjectStatus();
+  setWorkspaceView(state.currentView);
 }
 
 function openProject(projectId: string): void {
@@ -877,21 +1212,7 @@ function assignFiles(files: File[]): void {
 }
 
 function applyOverride(path: string, patch: PhotoOverride): void {
-  const current = state.overrides[path] ?? {};
-  state.overrides[path] = {
-    ...current,
-    ...patch
-  };
-
-  const project = currentProject();
-  if (project) {
-    project.overrides = {
-      ...project.overrides,
-      [path]: state.overrides[path]
-    };
-    saveProject(project);
-    renderProjectDashboard();
-  }
+  saveOverrideAndActivity(path, patch, `Override updated for ${path}`);
 
   updateDashboardFromState();
 }
@@ -907,8 +1228,39 @@ function initializeIntakeApp(): void {
   const table = document.getElementById("photoTable");
   const projectList = document.getElementById("projectList");
   const inboxTable = document.getElementById("inboxTable");
+  const inboxSearch = document.getElementById("inboxSearch") as HTMLInputElement | null;
+  const inboxKind = document.getElementById("inboxKindFilter") as HTMLSelectElement | null;
+  const inboxDecision = document.getElementById("inboxDecisionFilter") as HTMLSelectElement | null;
+  const batchAccept = document.getElementById("batchAcceptBtn") as HTMLButtonElement | null;
+  const batchReject = document.getElementById("batchRejectBtn") as HTMLButtonElement | null;
+  const workspaceNav = document.getElementById("workspaceNav");
+  const photoGrid = document.getElementById("photoGrid");
+  const photoDetail = document.getElementById("photoDetail");
+  const rankList = document.getElementById("rankList");
+  const directorConversation = document.getElementById("directorConversation");
 
-  if (!folderInput || !filesInput || !replaceInput || !analyzeBtn || !dropzone || !addressInput || !priceInput || !table || !projectList || !inboxTable) {
+  if (
+    !folderInput ||
+    !filesInput ||
+    !replaceInput ||
+    !analyzeBtn ||
+    !dropzone ||
+    !addressInput ||
+    !priceInput ||
+    !table ||
+    !projectList ||
+    !inboxTable ||
+    !inboxSearch ||
+    !inboxKind ||
+    !inboxDecision ||
+    !batchAccept ||
+    !batchReject ||
+    !workspaceNav ||
+    !photoGrid ||
+    !photoDetail ||
+    !rankList ||
+    !directorConversation
+  ) {
     return;
   }
 
@@ -1060,6 +1412,141 @@ function initializeIntakeApp(): void {
     setInboxDecision(itemId, decision);
   });
 
+  inboxSearch.addEventListener("input", () => {
+    state.inboxSearch = inboxSearch.value;
+    renderInbox();
+  });
+
+  inboxKind.addEventListener("change", () => {
+    state.inboxKindFilter = inboxKind.value;
+    renderInbox();
+  });
+
+  inboxDecision.addEventListener("change", () => {
+    state.inboxDecisionFilter = inboxDecision.value;
+    renderInbox();
+  });
+
+  batchAccept.addEventListener("click", () => applyBatchInboxDecision("accept"));
+  batchReject.addEventListener("click", () => applyBatchInboxDecision("reject"));
+
+  workspaceNav.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const view = target.getAttribute("data-workspace-view");
+    if (!view || !isWorkspaceView(view)) {
+      return;
+    }
+    setWorkspaceView(view);
+  });
+
+  photoGrid.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const button = target.closest<HTMLElement>("[data-photo-select]");
+    if (!button) {
+      return;
+    }
+    const path = button.getAttribute("data-photo-select");
+    if (!path) {
+      return;
+    }
+    state.selectedPhotoPath = path;
+    renderPhotoWorkspace();
+  });
+
+  photoDetail.addEventListener("change", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) {
+      return;
+    }
+    const path = target.getAttribute("data-path");
+    const flag = target.getAttribute("data-photo-flag");
+    if (!path || !flag || !isPhotoFlagKey(flag)) {
+      return;
+    }
+    const value = target.checked;
+    saveOverrideAndActivity(path, { [flag]: value }, `Updated ${flag} for ${path}`);
+    updateDashboardFromState();
+  });
+
+  let dragPath: string | null = null;
+  rankList.addEventListener("dragstart", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const path = target.getAttribute("data-rank-path");
+    if (!path || target.classList.contains("locked")) {
+      return;
+    }
+    dragPath = path;
+  });
+
+  rankList.addEventListener("dragover", (event) => {
+    event.preventDefault();
+  });
+
+  rankList.addEventListener("drop", (event) => {
+    event.preventDefault();
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || !dragPath) {
+      return;
+    }
+    const dropTarget = target.closest<HTMLElement>("[data-rank-path]");
+    if (!dropTarget) {
+      return;
+    }
+    const dropPath = dropTarget.getAttribute("data-rank-path");
+    if (!dropPath || dropPath === dragPath) {
+      return;
+    }
+
+    const photos = [...effectivePhotos()].sort((a, b) => a.recommendedMlsOrder - b.recommendedMlsOrder);
+    const movable = photos.filter((photo) => !photoOverride(photo.filePath).rankLocked);
+    const fromIndex = movable.findIndex((photo) => photo.filePath === dragPath);
+    const toIndex = movable.findIndex((photo) => photo.filePath === dropPath);
+    if (fromIndex < 0 || toIndex < 0) {
+      return;
+    }
+
+    const moved = [...movable];
+    const [item] = moved.splice(fromIndex, 1);
+    if (!item) {
+      return;
+    }
+    moved.splice(toIndex, 0, item);
+
+    moved.forEach((photo, index) => {
+      saveOverrideAndActivity(photo.filePath, { rank: index + 1 }, `Manually reordered ${photo.filePath} to #${index + 1}`);
+    });
+    dragPath = null;
+    updateDashboardFromState();
+  });
+
+  directorConversation.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || !target.classList.contains("accept-recommendation")) {
+      return;
+    }
+    const message = target.getAttribute("data-message") ?? "Recommendation accepted";
+    const project = currentProject();
+    if (!project) {
+      return;
+    }
+    const updated = pushProjectActivity(project, {
+      type: "recommendation-accepted",
+      message
+    });
+    saveProject(updated);
+    renderActivityFeed();
+    renderProjectDashboard();
+  });
+
   projectList.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
@@ -1075,6 +1562,7 @@ function initializeIntakeApp(): void {
   renderProjectDashboard();
   renderProjectStatus();
   renderInbox();
+  setWorkspaceView(state.currentView);
   if (state.projects.length > 0) {
     openProject(state.projects[0]?.id ?? "");
   }

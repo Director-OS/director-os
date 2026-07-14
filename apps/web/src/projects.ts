@@ -37,6 +37,19 @@ export interface ProjectMediaEntry {
   history: ProjectMediaHistoryEntry[];
 }
 
+export interface ProjectActivityEntry {
+  at: string;
+  type:
+    | "import"
+    | "analysis"
+    | "override"
+    | "replacement"
+    | "delete"
+    | "recommendation-accepted"
+    | "status";
+  message: string;
+}
+
 export interface DirectorProject {
   id: string;
   address: string;
@@ -52,6 +65,7 @@ export interface DirectorProject {
   latestReview: DirectorReview | null;
   newSinceLastAnalysis: number;
   status: ProjectStatus;
+  activity: ProjectActivityEntry[];
 }
 
 const STORAGE_KEY = "director-os-projects-v1";
@@ -80,10 +94,30 @@ function readAll(): DirectorProject[] {
 
   try {
     const parsed = JSON.parse(raw) as DirectorProject[];
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.map((project) => normalizeProject(project));
   } catch {
     return [];
   }
+}
+
+function normalizeProject(project: DirectorProject): DirectorProject {
+  return {
+    ...project,
+    uploadHistory: Array.isArray(project.uploadHistory) ? project.uploadHistory : [],
+    media: Array.isArray(project.media) ? project.media : [],
+    overrides: project.overrides ?? {},
+    newSinceLastAnalysis: Number.isFinite(project.newSinceLastAnalysis) ? project.newSinceLastAnalysis : 0,
+    status: project.status ?? {
+      mediaComplete: false,
+      marketingComplete: false,
+      mlsReady: false,
+      launchReady: false
+    },
+    activity: Array.isArray(project.activity) ? project.activity : []
+  };
 }
 
 function writeAll(projects: DirectorProject[]): void {
@@ -140,7 +174,14 @@ export function getOrCreateProject(address: string, listPrice: string): Director
       marketingComplete: false,
       mlsReady: false,
       launchReady: false
-    }
+    },
+    activity: [
+      {
+        at: now,
+        type: "status",
+        message: "Project created"
+      }
+    ]
   };
 
   writeAll([created, ...projects]);
@@ -178,7 +219,8 @@ export function syncUploadIntoProject(
   const updatedProject: DirectorProject = {
     ...project,
     media: [...project.media],
-    uploadHistory: [...project.uploadHistory]
+    uploadHistory: [...project.uploadHistory],
+    activity: [...project.activity]
   };
 
   const newFiles: File[] = [];
@@ -203,6 +245,11 @@ export function syncUploadIntoProject(
       replaced.replacedByKey = key;
       replaced.updatedAt = now;
       replaced.history.push({ action: "replaced", at: now, note: `Replaced by ${file.name}` });
+      updatedProject.activity.unshift({
+        at: now,
+        type: "replacement",
+        message: `Replaced ${effectivePath} with ${file.name}`
+      });
     }
 
     updatedProject.media.push({
@@ -232,6 +279,12 @@ export function syncUploadIntoProject(
     newCount: newFiles.length,
     existingCount: existingFiles.length,
     note: replacePath ? `Replace operation for ${replacePath}` : undefined
+  });
+
+  updatedProject.activity.unshift({
+    at: now,
+    type: "import",
+    message: `Imported ${files.length} files (${newFiles.length} new, ${existingFiles.length} existing)`
   });
 
   return {
@@ -274,7 +327,18 @@ export function updateMediaMetrics(project: DirectorProject, metrics: PhotoMetri
 
   return {
     ...project,
-    media: updatedMedia
+    media: updatedMedia,
+    activity:
+      metrics.length > 0
+        ? [
+            {
+              at: now,
+              type: "analysis",
+              message: `Analyzed ${metrics.length} newly imported media files`
+            },
+            ...project.activity
+          ]
+        : project.activity
   };
 }
 
@@ -358,7 +422,15 @@ export function applyProjectStatus(project: DirectorProject, summary: IntakeSumm
     ...project,
     latestSummary: summary,
     latestReview: review,
-    status
+    status,
+    activity: [
+      {
+        at: nowIso(),
+        type: "status",
+        message: `Status updated: Launch readiness ${review.launchReadinessScore}/100`
+      },
+      ...project.activity
+    ]
   };
 }
 
@@ -382,7 +454,32 @@ export function deleteProjectMedia(project: DirectorProject, filePath: string): 
         updatedAt: now,
         history: [...item.history, deletedEntry]
       };
-    })
+    }),
+    activity: [
+      {
+        at: now,
+        type: "delete",
+        message: `Deleted ${filePath} from active media`
+      },
+      ...project.activity
+    ]
+  };
+}
+
+export function pushProjectActivity(
+  project: DirectorProject,
+  entry: Omit<ProjectActivityEntry, "at"> & { at?: string }
+): DirectorProject {
+  return {
+    ...project,
+    activity: [
+      {
+        at: entry.at ?? nowIso(),
+        type: entry.type,
+        message: entry.message
+      },
+      ...project.activity
+    ]
   };
 }
 
