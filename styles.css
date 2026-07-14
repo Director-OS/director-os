@@ -211,6 +211,40 @@ button:disabled {
   margin: 18px 0;
 }
 
+.executive-card {
+  margin-top: 14px;
+}
+
+.executive-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.executive-grid section {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  background: #101a2a;
+}
+
+.executive-grid h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  color: #dfe7f5;
+}
+
+.executive-grid p {
+  margin: 0 0 10px;
+  color: #e9eef7;
+  line-height: 1.4;
+}
+
+.executive-grid ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
 .score-card {
   display: grid;
   gap: 6px;
@@ -321,6 +355,72 @@ ul {
   gap: 6px;
 }
 
+.analysis-card {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #0b1422;
+}
+
+.analysis-card summary {
+  cursor: pointer;
+  color: #dde6f6;
+  font-weight: 700;
+}
+
+.analysis-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.analysis-grid section {
+  border: 1px solid #25344b;
+  border-radius: 10px;
+  padding: 10px;
+  background: #0f1b2d;
+}
+
+.analysis-grid section.wide {
+  grid-column: 1 / -1;
+}
+
+.analysis-grid h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #dfe7f5;
+}
+
+.analysis-grid ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.analysis-grid li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  font-size: 12px;
+  color: #dbe4f3;
+}
+
+.analysis-grid li small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
+
+.recommendation-list li {
+  padding: 6px 8px;
+  border: 1px solid #24344c;
+  border-radius: 8px;
+  background: #0c1626;
+}
+
 .control-block label {
   font-size: 12px;
   color: #dbe3f0;
@@ -343,6 +443,10 @@ ul {
     grid-template-columns: repeat(5, 1fr);
   }
 
+  .executive-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .photo-row {
     grid-template-columns: 86px 1fr 86px 96px;
   }
@@ -363,6 +467,14 @@ ul {
 
   .photo-row {
     grid-template-columns: 86px 1fr;
+  }
+
+  .analysis-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .executive-grid {
+    grid-template-columns: 1fr;
   }
 
   .photo-row .metric,

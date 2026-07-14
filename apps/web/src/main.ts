@@ -4,6 +4,7 @@ import {
   classifyMedia,
   createTextReport,
   isImageDescriptor,
+  type DirectorReview,
   type DecisionTag,
   type FileDescriptor,
   type IntakeSummary,
@@ -11,6 +12,7 @@ import {
   type PhotoMetrics,
   type SceneTag
 } from "./intake-analysis.js";
+import { PROBLEM_LABELS, SCENE_TAGS } from "./vision-engine.js";
 
 type FilterTag = "all" | "recommended" | "needs-work" | "remove";
 
@@ -47,10 +49,11 @@ function toMetricClass(value: number): "good" | "warn" | "bad" {
 }
 
 function prettySceneTag(tag: SceneTag): string {
-  if (tag === "primary-bedroom") {
-    return "primary bedroom";
-  }
-  return tag;
+  return tag.replace(/-/g, " ");
+}
+
+function formatConfidence(value: number): string {
+  return `${Math.round(value * 100)}%`;
 }
 
 function extractChannelMetrics(pixels: Uint8ClampedArray): {
@@ -367,6 +370,52 @@ function renderPhotoTable(photos: PhotoAssessment[]): void {
       const issues = photo.issues.length > 0 ? photo.issues.join(", ") : "none";
       const duplicate = photo.duplicateGroupId ? `D${photo.duplicateGroupId}` : "-";
       const similar = photo.similarGroupId ? `S${photo.similarGroupId}` : "-";
+      const detectedProblems = photo.vision.problems.filter((item) => item.detected);
+
+      const qualityRows = [
+        ["Sharpness", photo.vision.quality.sharpness],
+        ["Noise", photo.vision.quality.noise],
+        ["Brightness", photo.vision.quality.brightness],
+        ["Exposure", photo.vision.quality.exposure],
+        ["White balance", photo.vision.quality.whiteBalance],
+        ["Contrast", photo.vision.quality.contrast],
+        ["Dynamic range", photo.vision.quality.dynamicRange],
+        ["Resolution", photo.vision.quality.resolution],
+        ["Horizon level", photo.vision.quality.horizonLevel],
+        ["Lens distortion", photo.vision.quality.lensDistortion],
+        ["Vertical correction", photo.vision.quality.verticalCorrection],
+        ["Composition", photo.vision.quality.composition]
+      ]
+        .map(([label, score]) => `<li><span>${label}</span><strong>${score}/100</strong></li>`)
+        .join("");
+
+      const marketingRows = [
+        ["Hero image", photo.vision.marketing.heroImageScore],
+        ["Zillow appeal", photo.vision.marketing.zillowAppeal],
+        ["MLS appeal", photo.vision.marketing.mlsAppeal],
+        ["Luxury appeal", photo.vision.marketing.luxuryAppeal],
+        ["Emotional impact", photo.vision.marketing.emotionalImpact],
+        ["Click likelihood", photo.vision.marketing.clickLikelihood]
+      ]
+        .map(([label, score]) => `<li><span>${label}</span><strong>${score}/100</strong></li>`)
+        .join("");
+
+      const problemRows = PROBLEM_LABELS.map((label) => {
+        const problem = photo.vision.problems.find((item) => item.label === label);
+        if (!problem || !problem.detected) {
+          return `<li><span>${label}</span><strong>clear</strong></li>`;
+        }
+        return `<li><span>${label}</span><strong>${formatConfidence(problem.confidence)} detected</strong></li>`;
+      }).join("");
+
+      const recommendationRows = photo.vision.recommendations
+        .map(
+          (item) =>
+            `<li><span>${item.action.replace(/-/g, " ")}</span><strong>${formatConfidence(item.confidence)}</strong><small>${item.reason}</small></li>`
+        )
+        .join("");
+
+      const analysisSummary = `${prettySceneTag(photo.vision.scene.label)} (${formatConfidence(photo.vision.scene.confidence)}) | ${detectedProblems.length} problems flagged`;
 
       return `<div class="photo-row" data-photo-path="${photo.filePath}">
         <img class="thumb" src="${photo.thumbnailUrl}" alt="${photo.fileName}" />
@@ -376,12 +425,40 @@ function renderPhotoTable(photos: PhotoAssessment[]): void {
           <small>Scores: sharpness ${photo.scores.sharpness}, exposure ${photo.scores.exposure}, brightness ${photo.scores.brightness}, contrast ${photo.scores.contrast}, resolution ${photo.scores.resolution}, orientation ${photo.scores.orientation}, aspect ${photo.scores.usableAspect}</small>
           <small>Issues: ${issues}</small>
           <small>Recommendation: ${photo.recommendationReasons.join(" ")}</small>
+          <details class="analysis-card">
+            <summary>Vision analysis: ${analysisSummary}</summary>
+            <div class="analysis-grid">
+              <section>
+                <h4>Scene Detection</h4>
+                <ul>
+                  <li><span>Detected scene</span><strong>${prettySceneTag(photo.vision.scene.label)}</strong></li>
+                  <li><span>Confidence</span><strong>${formatConfidence(photo.vision.scene.confidence)}</strong></li>
+                </ul>
+              </section>
+              <section>
+                <h4>Photo Quality</h4>
+                <ul>${qualityRows}</ul>
+              </section>
+              <section>
+                <h4>Marketing Analysis</h4>
+                <ul>${marketingRows}</ul>
+              </section>
+              <section>
+                <h4>Problem Detection</h4>
+                <ul>${problemRows}</ul>
+              </section>
+              <section class="wide">
+                <h4>Recommendations</h4>
+                <ul class="recommendation-list">${recommendationRows}</ul>
+              </section>
+            </div>
+          </details>
         </div>
         <div class="metric ${scoreClass}">${photo.heroScore}<small>Hero</small></div>
         <div class="metric hide-mobile">${photo.recommendedMlsOrder}<small>MLS order</small></div>
         <div class="control-block">
           <label>Room
-            <select class="scene-override" data-path="${photo.filePath}">${selectOptions<SceneTag>(["exterior", "backyard", "kitchen", "primary-bedroom", "bathroom", "interior", "unknown"], photo.sceneTag)}</select>
+            <select class="scene-override" data-path="${photo.filePath}">${selectOptions<SceneTag>([...SCENE_TAGS], photo.sceneTag)}</select>
           </label>
         </div>
         <div class="control-block">
@@ -425,6 +502,15 @@ function updateDashboardFromState(): void {
   setText("removeCount", `${photos.filter((photo) => photo.decision === "remove").length}`);
 }
 
+function renderExecutiveSummary(review: DirectorReview): void {
+  const exec = review.executiveSummary;
+  setText("execHero", exec.heroImageRecommendation);
+  setText("execReadiness", exec.estimatedMlsReadiness);
+  updateList("execStrengths", exec.strengths, "No strengths identified yet.");
+  updateList("execWeaknesses", exec.weaknesses, "No weaknesses identified yet.");
+  updateList("execMissingShots", exec.missingShots, "No missing shots identified.");
+}
+
 function renderResults(summary: IntakeSummary): void {
   const review = buildDirectorReview(summary);
   state.summary = summary;
@@ -450,6 +536,7 @@ function renderResults(summary: IntakeSummary): void {
   setText("story", review.storyAngle);
   setText("angle", review.buyerAngle);
   setText("runtime", summary.mediaCounts.videos > 0 ? "30-60 second highlight cut" : "Capture teaser before launch");
+  renderExecutiveSummary(review);
 
   updateList("missingMedia", review.missingMedia, "No missing media detected.");
   updateList("shotChecklist", review.missingShotChecklist, "No critical missing shot detected.");

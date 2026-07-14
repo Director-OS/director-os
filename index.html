@@ -14,7 +14,7 @@
         <h1>Listing Intake</h1>
         <p class="sub">Drop an unnamed listing folder. Director audits all media and builds a launch-ready dashboard.</p>
       </div>
-      <span class="version">v0.3</span>
+      <span class="version">v1.0</span>
     </header>
 
     <section class="card intake">
@@ -37,6 +37,35 @@
     </section>
 
     <section id="results" class="hidden">
+      <article class="card executive-card">
+        <div class="section-head">
+          <div>
+            <h2>Executive Summary</h2>
+            <p>AI-generated strengths, weaknesses, missing shots, and launch confidence for MLS sequencing.</p>
+          </div>
+        </div>
+        <div class="executive-grid">
+          <section>
+            <h3>Strengths</h3>
+            <ul id="execStrengths"></ul>
+          </section>
+          <section>
+            <h3>Weaknesses</h3>
+            <ul id="execWeaknesses"></ul>
+          </section>
+          <section>
+            <h3>Missing Shots</h3>
+            <ul id="execMissingShots"></ul>
+          </section>
+          <section>
+            <h3>Hero Recommendation</h3>
+            <p id="execHero">-</p>
+            <h3>Estimated MLS Readiness</h3>
+            <p id="execReadiness">-</p>
+          </section>
+        </div>
+      </article>
+
       <div class="score-grid">
         <article class="card score-card"><span>Launch readiness</span><strong id="launchScore">-</strong><small id="launchLabel">-</small></article>
         <article class="card score-card"><span>Total files</span><strong id="fileCount">0</strong><small>All selected files analyzed</small></article>
