@@ -13,6 +13,21 @@ import {
   type SceneTag
 } from "./intake-analysis.js";
 import { PROBLEM_LABELS, SCENE_TAGS } from "./vision-engine.js";
+import {
+  activeMedia,
+  applyProjectStatus,
+  attachAssessments,
+  deleteProjectMedia,
+  getOrCreateProject,
+  listProjects,
+  loadProject,
+  mergeAssessmentsWithHistory,
+  projectSummaryFromStored,
+  saveProject,
+  syncUploadIntoProject,
+  updateMediaMetrics,
+  type DirectorProject
+} from "./projects.js";
 
 type FilterTag = "all" | "recommended" | "needs-work" | "remove";
 
@@ -28,6 +43,9 @@ interface AppState {
   photoAssessments: PhotoAssessment[];
   filter: FilterTag;
   overrides: Record<string, PhotoOverride>;
+  currentProjectId: string | null;
+  projects: DirectorProject[];
+  pendingReplacePath: string | null;
 }
 
 const state: AppState = {
@@ -35,7 +53,10 @@ const state: AppState = {
   summary: null,
   photoAssessments: [],
   filter: "all",
-  overrides: {}
+  overrides: {},
+  currentProjectId: null,
+  projects: [],
+  pendingReplacePath: null
 };
 
 function toMetricClass(value: number): "good" | "warn" | "bad" {
@@ -190,7 +211,7 @@ function extractChannelMetrics(pixels: Uint8ClampedArray): {
   };
 }
 
-async function analyzePhoto(file: File): Promise<PhotoMetrics> {
+async function analyzePhoto(file: File, forcedPath?: string): Promise<PhotoMetrics> {
   const bitmap = await createImageBitmap(file);
   const originalWidth = bitmap.width;
   const originalHeight = bitmap.height;
@@ -215,7 +236,7 @@ async function analyzePhoto(file: File): Promise<PhotoMetrics> {
 
   return {
     fileName: file.name,
-    filePath: file.webkitRelativePath || file.name,
+    filePath: forcedPath ?? file.webkitRelativePath ?? file.name,
     thumbnailUrl: URL.createObjectURL(file),
     width: originalWidth,
     height: originalHeight,
@@ -252,6 +273,78 @@ function setText(id: string, value: string): void {
   if (element) {
     element.textContent = value;
   }
+}
+
+function currentProject(): DirectorProject | null {
+  if (!state.currentProjectId) {
+    return null;
+  }
+  return loadProject(state.currentProjectId);
+}
+
+function refreshProjects(): void {
+  state.projects = listProjects();
+}
+
+function renderProjectDashboard(): void {
+  const list = document.getElementById("projectList");
+  if (!list) {
+    return;
+  }
+
+  refreshProjects();
+  list.innerHTML = "";
+
+  if (state.projects.length === 0) {
+    const li = document.createElement("li");
+    li.textContent = "No projects yet. Analyze a property to create one.";
+    list.appendChild(li);
+    return;
+  }
+
+  for (const project of state.projects) {
+    const li = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary project-link";
+    if (project.id === state.currentProjectId) {
+      button.classList.add("active-project");
+    }
+    const analyzed = project.lastAnalyzedAt ? new Date(project.lastAnalyzedAt).toLocaleString() : "never";
+    button.textContent = `${project.address} | Updated ${new Date(project.updatedAt).toLocaleDateString()} | Last analyzed ${analyzed}`;
+    button.dataset.projectId = project.id;
+    li.appendChild(button);
+    list.appendChild(li);
+  }
+}
+
+function renderProjectStatus(): void {
+  const project = currentProject();
+  if (!project) {
+    setText("statusMediaComplete", "No");
+    setText("statusMarketingComplete", "No");
+    setText("statusMlsReady", "No");
+    setText("statusLaunchReady", "No");
+    setText("newSinceLastAnalysis", "0");
+    setText("lastUploadAt", "-");
+    updateList("uploadHistory", [], "No uploads yet.");
+    return;
+  }
+
+  setText("statusMediaComplete", project.status.mediaComplete ? "Yes" : "No");
+  setText("statusMarketingComplete", project.status.marketingComplete ? "Yes" : "No");
+  setText("statusMlsReady", project.status.mlsReady ? "Yes" : "No");
+  setText("statusLaunchReady", project.status.launchReady ? "Yes" : "No");
+  setText("newSinceLastAnalysis", `${project.newSinceLastAnalysis}`);
+  setText("lastUploadAt", project.lastUploadAt ? new Date(project.lastUploadAt).toLocaleString() : "-");
+  updateList(
+    "uploadHistory",
+    project.uploadHistory.slice(0, 8).map(
+      (item) =>
+        `${new Date(item.uploadedAt).toLocaleString()} | files ${item.fileCount} | new ${item.newCount} | existing ${item.existingCount}${item.note ? ` | ${item.note}` : ""}`
+    ),
+    "No uploads yet."
+  );
 }
 
 function triggerDownload(fileName: string, mimeType: string, content: string): void {
@@ -471,6 +564,10 @@ function renderPhotoTable(photos: PhotoAssessment[]): void {
             <input type="number" min="1" class="rank-override" data-path="${photo.filePath}" value="${photo.recommendedMlsOrder}" />
           </label>
         </div>
+        <div class="control-block">
+          <button type="button" class="secondary replace-file" data-path="${photo.filePath}">Replace</button>
+          <button type="button" class="secondary delete-file" data-path="${photo.filePath}">Delete</button>
+        </div>
       </div>`;
     })
     .join("");
@@ -500,6 +597,7 @@ function updateDashboardFromState(): void {
   setText("recommendedCount", `${photos.filter((photo) => photo.decision === "recommended").length}`);
   setText("needsWorkCount", `${photos.filter((photo) => photo.decision === "needs-work").length}`);
   setText("removeCount", `${photos.filter((photo) => photo.decision === "remove").length}`);
+  renderProjectStatus();
 }
 
 function renderExecutiveSummary(review: DirectorReview): void {
@@ -515,6 +613,11 @@ function renderResults(summary: IntakeSummary): void {
   const review = buildDirectorReview(summary);
   state.summary = summary;
   state.photoAssessments = summary.photos;
+
+  const project = currentProject();
+  if (project) {
+    state.overrides = project.overrides as Record<string, PhotoOverride>;
+  }
 
   const results = document.getElementById("results");
   const progressCard = document.getElementById("progressCard");
@@ -563,38 +666,76 @@ function renderResults(summary: IntakeSummary): void {
   }
 
   updateDashboardFromState();
+  renderProjectDashboard();
+  renderProjectStatus();
 }
 
-async function processIntake(files: File[], address: string, listPrice: string): Promise<void> {
+function openProject(projectId: string): void {
+  const project = loadProject(projectId);
+  if (!project) {
+    return;
+  }
+
+  state.currentProjectId = project.id;
+  state.overrides = project.overrides as Record<string, PhotoOverride>;
+
+  const summary = projectSummaryFromStored(project);
+  if (!summary) {
+    renderProjectDashboard();
+    renderProjectStatus();
+    return;
+  }
+
+  const addressInput = document.getElementById("address") as HTMLInputElement | null;
+  const priceInput = document.getElementById("price") as HTMLInputElement | null;
+  if (addressInput) {
+    addressInput.value = project.address;
+  }
+  if (priceInput) {
+    priceInput.value = project.listPrice;
+  }
+
+  renderResults(summary);
+}
+
+async function processIntake(files: File[], address: string, listPrice: string, replacePath?: string): Promise<void> {
   const progressCard = document.getElementById("progressCard");
   if (progressCard) {
     progressCard.classList.remove("hidden");
   }
 
-  const descriptors: FileDescriptor[] = files.map((file) => ({
-    name: file.name,
-    path: file.webkitRelativePath || file.name,
-    type: file.type,
-    size: file.size
+  const project = getOrCreateProject(address, listPrice);
+  if (state.currentProjectId !== project.id) {
+    state.overrides = project.overrides as Record<string, PhotoOverride>;
+  }
+  state.currentProjectId = project.id;
+
+  const synced = syncUploadIntoProject(project, files, replacePath);
+  let workingProject = synced.project;
+
+  const descriptors: FileDescriptor[] = activeMedia(workingProject).map((entry) => ({
+    name: entry.fileName,
+    path: entry.filePath,
+    type: entry.type,
+    size: entry.size
   }));
 
-  const mediaCounts = classifyMedia(descriptors);
   const photoMetrics: PhotoMetrics[] = [];
-
-  for (let index = 0; index < files.length; index += 1) {
-    const file = files[index];
+  for (let index = 0; index < synced.newFiles.length; index += 1) {
+    const file = synced.newFiles[index];
     if (!file) {
       continue;
     }
 
     setProgress(
-      Math.round(((index + 1) / Math.max(files.length, 1)) * 100),
-      `Analyzing file ${index + 1} of ${files.length}: ${file.name}`
+      Math.round(((index + 1) / Math.max(synced.newFiles.length, 1)) * 100),
+      `Analyzing new media ${index + 1} of ${synced.newFiles.length}: ${file.name}`
     );
 
     if (isImageDescriptor({ name: file.name, type: file.type })) {
       try {
-        const metrics = await analyzePhoto(file);
+        const forcedPath = synced.filePathByName.get(file.name);
+        const metrics = await analyzePhoto(file, forcedPath);
         photoMetrics.push(metrics);
       } catch {
         // Continue analysis even if one image cannot be decoded.
@@ -602,18 +743,39 @@ async function processIntake(files: File[], address: string, listPrice: string):
     }
   }
 
-  const photos = assessPhotos(photoMetrics);
+  // Existing analyzed media are retained; only newly added files are decoded again.
+  workingProject = updateMediaMetrics(workingProject, photoMetrics);
 
+  const allMetrics = activeMedia(workingProject)
+    .map((entry) => entry.metrics)
+    .filter((item): item is PhotoMetrics => item !== null);
+
+  const previousAssessments = activeMedia(workingProject)
+    .map((entry) => entry.analysis)
+    .filter((item): item is PhotoAssessment => item !== null);
+
+  const analyzed = assessPhotos(allMetrics);
+  const photos = mergeAssessmentsWithHistory(previousAssessments, analyzed);
+  workingProject = attachAssessments(workingProject, photos);
+
+  const mediaCounts = classifyMedia(descriptors);
   const summary: IntakeSummary = {
-    address,
-    listPrice,
-    fileCount: files.length,
+    address: workingProject.address,
+    listPrice: workingProject.listPrice,
+    fileCount: descriptors.length,
     mediaCounts,
     photos,
     generatedAt: new Date().toISOString()
   };
 
+  const review = buildDirectorReview(summary);
+  workingProject = applyProjectStatus(workingProject, summary, review);
+  workingProject.overrides = { ...state.overrides };
+  saveProject(workingProject);
+
   renderResults(summary);
+  renderProjectDashboard();
+  renderProjectStatus();
 }
 
 function assignFiles(files: File[]): void {
@@ -639,18 +801,31 @@ function applyOverride(path: string, patch: PhotoOverride): void {
     ...current,
     ...patch
   };
+
+  const project = currentProject();
+  if (project) {
+    project.overrides = {
+      ...project.overrides,
+      [path]: state.overrides[path]
+    };
+    saveProject(project);
+    renderProjectDashboard();
+  }
+
   updateDashboardFromState();
 }
 
 function initializeIntakeApp(): void {
   const folderInput = document.getElementById("folderInput") as HTMLInputElement | null;
+  const replaceInput = document.getElementById("replaceInput") as HTMLInputElement | null;
   const analyzeBtn = document.getElementById("analyzeBtn") as HTMLButtonElement | null;
   const dropzone = document.getElementById("dropzone");
   const addressInput = document.getElementById("address") as HTMLInputElement | null;
   const priceInput = document.getElementById("price") as HTMLInputElement | null;
   const table = document.getElementById("photoTable");
+  const projectList = document.getElementById("projectList");
 
-  if (!folderInput || !analyzeBtn || !dropzone || !addressInput || !priceInput || !table) {
+  if (!folderInput || !replaceInput || !analyzeBtn || !dropzone || !addressInput || !priceInput || !table || !projectList) {
     return;
   }
 
@@ -683,6 +858,25 @@ function initializeIntakeApp(): void {
         await processIntake(state.files, addressInput.value.trim(), priceInput.value.trim());
       } finally {
         analyzeBtn.disabled = false;
+      }
+    })();
+  });
+
+  replaceInput.addEventListener("change", () => {
+    const replacement = replaceInput.files?.[0];
+    const replacePath = state.pendingReplacePath;
+    if (!replacement || !replacePath) {
+      return;
+    }
+
+    void (async () => {
+      analyzeBtn.disabled = true;
+      try {
+        await processIntake([replacement], addressInput.value.trim(), priceInput.value.trim(), replacePath);
+      } finally {
+        analyzeBtn.disabled = false;
+        state.pendingReplacePath = null;
+        replaceInput.value = "";
       }
     })();
   });
@@ -727,6 +921,52 @@ function initializeIntakeApp(): void {
       }
     }
   });
+
+  table.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const path = target.getAttribute("data-path");
+    if (!path) {
+      return;
+    }
+
+    if (target.classList.contains("delete-file")) {
+      const project = currentProject();
+      if (!project) {
+        return;
+      }
+      const updated = deleteProjectMedia(project, path);
+      saveProject(updated);
+      openProject(updated.id);
+      return;
+    }
+
+    if (target.classList.contains("replace-file")) {
+      state.pendingReplacePath = path;
+      replaceInput.click();
+    }
+  });
+
+  projectList.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const projectId = target.getAttribute("data-project-id");
+    if (!projectId) {
+      return;
+    }
+    openProject(projectId);
+  });
+
+  renderProjectDashboard();
+  renderProjectStatus();
+  if (state.projects.length > 0) {
+    openProject(state.projects[0]?.id ?? "");
+  }
 }
 
 if (typeof document !== "undefined") {

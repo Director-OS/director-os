@@ -17,9 +17,20 @@
       <span class="version">v1.0</span>
     </header>
 
+    <section class="card">
+      <div class="section-head">
+        <div>
+          <h2>Project Dashboard</h2>
+          <p>Every property is a persistent project. Reopen any listing and continue incremental analysis.</p>
+        </div>
+      </div>
+      <ul id="projectList" class="project-list"></ul>
+    </section>
+
     <section class="card intake">
       <label class="dropzone" id="dropzone">
         <input id="folderInput" type="file" webkitdirectory multiple />
+        <input id="replaceInput" type="file" accept="image/*" hidden />
         <strong>Select listing folder</strong>
         <span>No renaming or sorting required</span>
       </label>
@@ -64,6 +75,25 @@
             <p id="execReadiness">-</p>
           </section>
         </div>
+      </article>
+
+      <article class="card">
+        <div class="section-head">
+          <div>
+            <h2>Project Status</h2>
+            <p>Persistent project readiness and incremental upload tracking.</p>
+          </div>
+        </div>
+        <div class="status-grid">
+          <article class="status-item"><span>Media Complete</span><strong id="statusMediaComplete">No</strong></article>
+          <article class="status-item"><span>Marketing Complete</span><strong id="statusMarketingComplete">No</strong></article>
+          <article class="status-item"><span>MLS Ready</span><strong id="statusMlsReady">No</strong></article>
+          <article class="status-item"><span>Launch Ready</span><strong id="statusLaunchReady">No</strong></article>
+          <article class="status-item"><span>New Since Last Analysis</span><strong id="newSinceLastAnalysis">0</strong></article>
+          <article class="status-item"><span>Last Upload</span><strong id="lastUploadAt">-</strong></article>
+        </div>
+        <h3>Upload History</h3>
+        <ul id="uploadHistory"></ul>
       </article>
 
       <div class="score-grid">
