@@ -113,6 +113,10 @@ h2 {
   display: none;
 }
 
+#replaceInput {
+  display: none;
+}
+
 .dropzone strong {
   font-size: 24px;
 }
@@ -364,6 +368,41 @@ ul {
   margin-top: 18px;
 }
 
+.inbox-table {
+  display: grid;
+  gap: 10px;
+}
+
+.inbox-row {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  background: #0f1a2b;
+}
+
+.inbox-row small {
+  display: block;
+  color: var(--muted);
+}
+
+.inbox-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.inbox-actions button {
+  padding: 8px 12px;
+}
+
+.active-pill {
+  outline: 2px solid var(--accent);
+}
+
 .photo-row {
   display: grid;
   grid-template-columns: 86px minmax(220px, 2fr) 86px 96px repeat(3, minmax(140px, 1fr));
@@ -516,6 +555,10 @@ ul {
 
   .photo-row {
     grid-template-columns: 86px 1fr;
+  }
+
+  .inbox-row {
+    grid-template-columns: 1fr;
   }
 
   .analysis-grid {

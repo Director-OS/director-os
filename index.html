@@ -30,15 +30,26 @@
     <section class="card intake">
       <label class="dropzone" id="dropzone">
         <input id="folderInput" type="file" webkitdirectory multiple />
+        <input id="filesInput" type="file" multiple />
         <input id="replaceInput" type="file" accept="image/*" hidden />
-        <strong>Select listing folder</strong>
-        <span>No renaming or sorting required</span>
+        <strong>Import Folder / Files</strong>
+        <span>Drop files here or use folder/files picker for Director Inbox review</span>
       </label>
       <div class="fields">
         <label>Property address<input id="address" value="3004 Blackhawk Road, Dayton, OH 45420" /></label>
         <label>List price<input id="price" value="$200,000" /></label>
       </div>
-      <button id="analyzeBtn" disabled>Analyze listing</button>
+      <button id="analyzeBtn" disabled>Import accepted files</button>
+    </section>
+
+    <section id="inboxCard" class="card hidden">
+      <div class="section-head">
+        <div>
+          <h2>Director Inbox</h2>
+          <p id="inboxSummary">No files queued</p>
+        </div>
+      </div>
+      <div id="inboxTable" class="inbox-table"></div>
     </section>
 
     <section id="progressCard" class="card hidden">

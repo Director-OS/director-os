@@ -28,6 +28,13 @@ import {
   updateMediaMetrics,
   type DirectorProject
 } from "./projects.js";
+import {
+  acceptedFiles,
+  buildInbox,
+  classifyCounts,
+  type InboxDecision,
+  type InboxItem
+} from "./inbox.js";
 
 type FilterTag = "all" | "recommended" | "needs-work" | "remove";
 
@@ -39,6 +46,7 @@ interface PhotoOverride {
 
 interface AppState {
   files: File[];
+  inboxItems: InboxItem[];
   summary: IntakeSummary | null;
   photoAssessments: PhotoAssessment[];
   filter: FilterTag;
@@ -50,6 +58,7 @@ interface AppState {
 
 const state: AppState = {
   files: [],
+  inboxItems: [],
   summary: null,
   photoAssessments: [],
   filter: "all",
@@ -355,6 +364,78 @@ function triggerDownload(fileName: string, mimeType: string, content: string): v
   anchor.download = fileName;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+function prettyInboxKind(kind: string): string {
+  return kind.replace(/-/g, " ");
+}
+
+function renderInbox(): void {
+  const card = document.getElementById("inboxCard");
+  const table = document.getElementById("inboxTable");
+  const importBtn = document.getElementById("analyzeBtn") as HTMLButtonElement | null;
+
+  if (!card || !table || !importBtn) {
+    return;
+  }
+
+  if (state.inboxItems.length === 0) {
+    card.classList.add("hidden");
+    table.innerHTML = "";
+    importBtn.disabled = true;
+    importBtn.textContent = "Import accepted files";
+    setText("inboxSummary", "No files queued");
+    return;
+  }
+
+  card.classList.remove("hidden");
+
+  const acceptedCount = state.inboxItems.filter((item) => item.decision === "accept").length;
+  const rejectedCount = state.inboxItems.filter((item) => item.decision === "reject").length;
+  const ignoredCount = state.inboxItems.filter((item) => item.decision === "ignore").length;
+  const counts = classifyCounts(state.inboxItems);
+
+  setText(
+    "inboxSummary",
+    `Accepted ${acceptedCount} | Rejected ${rejectedCount} | Ignored ${ignoredCount} | RAW ${counts.raw} | Edited ${counts.edited} | Drone ${counts.drone} | Video ${counts.video} | Floor plans ${counts["floor-plan"]} | Matterport ${counts.matterport} | Brochures ${counts.brochure} | Unknown ${counts.unknown}`
+  );
+
+  const rows = state.inboxItems
+    .map((item) => {
+      const lock = item.locked ? "disabled" : "";
+      const already = item.alreadyAnalyzed ? "already analyzed" : "new";
+      return `<div class="inbox-row" data-id="${item.id}">
+        <div>
+          <strong>${item.fileName}</strong>
+          <small>${item.filePath}</small>
+          <small>kind: ${prettyInboxKind(item.kind)} | confidence ${Math.round(item.confidence * 100)}% | ${already}</small>
+          <small>${item.recommendation}</small>
+        </div>
+        <div class="inbox-actions">
+          <button type="button" class="secondary inbox-decision ${item.decision === "accept" ? "active-pill" : ""}" data-id="${item.id}" data-decision="accept" ${lock}>Accept</button>
+          <button type="button" class="secondary inbox-decision ${item.decision === "reject" ? "active-pill" : ""}" data-id="${item.id}" data-decision="reject" ${lock}>Reject</button>
+          <button type="button" class="secondary inbox-decision ${item.decision === "ignore" ? "active-pill" : ""}" data-id="${item.id}" data-decision="ignore" ${lock}>Ignore</button>
+        </div>
+      </div>`;
+    })
+    .join("");
+
+  table.innerHTML = rows;
+  importBtn.disabled = acceptedCount === 0;
+  importBtn.textContent = `Import accepted files (${acceptedCount})`;
+}
+
+function setInboxDecision(itemId: string, decision: InboxDecision): void {
+  state.inboxItems = state.inboxItems.map((item) => {
+    if (item.id !== itemId || item.locked) {
+      return item;
+    }
+    return {
+      ...item,
+      decision
+    };
+  });
+  renderInbox();
 }
 
 function overrideFor(path: string): PhotoOverride {
@@ -780,12 +861,10 @@ async function processIntake(files: File[], address: string, listPrice: string, 
 
 function assignFiles(files: File[]): void {
   state.files = files;
-  const analyzeBtn = document.getElementById("analyzeBtn") as HTMLButtonElement | null;
   const dropzone = document.getElementById("dropzone");
-
-  if (analyzeBtn) {
-    analyzeBtn.disabled = files.length === 0;
-  }
+  const project = currentProject();
+  const alreadyAnalyzedPaths = new Set((project ? activeMedia(project) : []).map((item) => item.filePath));
+  state.inboxItems = buildInbox(files, alreadyAnalyzedPaths);
 
   if (dropzone) {
     const helperText = dropzone.querySelector("span");
@@ -793,6 +872,8 @@ function assignFiles(files: File[]): void {
       helperText.textContent = `${files.length} files selected`;
     }
   }
+
+  renderInbox();
 }
 
 function applyOverride(path: string, patch: PhotoOverride): void {
@@ -817,6 +898,7 @@ function applyOverride(path: string, patch: PhotoOverride): void {
 
 function initializeIntakeApp(): void {
   const folderInput = document.getElementById("folderInput") as HTMLInputElement | null;
+  const filesInput = document.getElementById("filesInput") as HTMLInputElement | null;
   const replaceInput = document.getElementById("replaceInput") as HTMLInputElement | null;
   const analyzeBtn = document.getElementById("analyzeBtn") as HTMLButtonElement | null;
   const dropzone = document.getElementById("dropzone");
@@ -824,13 +906,18 @@ function initializeIntakeApp(): void {
   const priceInput = document.getElementById("price") as HTMLInputElement | null;
   const table = document.getElementById("photoTable");
   const projectList = document.getElementById("projectList");
+  const inboxTable = document.getElementById("inboxTable");
 
-  if (!folderInput || !replaceInput || !analyzeBtn || !dropzone || !addressInput || !priceInput || !table || !projectList) {
+  if (!folderInput || !filesInput || !replaceInput || !analyzeBtn || !dropzone || !addressInput || !priceInput || !table || !projectList || !inboxTable) {
     return;
   }
 
   folderInput.addEventListener("change", () => {
     assignFiles(Array.from(folderInput.files ?? []));
+  });
+
+  filesInput.addEventListener("change", () => {
+    assignFiles(Array.from(filesInput.files ?? []));
   });
 
   dropzone.addEventListener("dragover", (event) => {
@@ -855,7 +942,16 @@ function initializeIntakeApp(): void {
     void (async () => {
       analyzeBtn.disabled = true;
       try {
-        await processIntake(state.files, addressInput.value.trim(), priceInput.value.trim());
+        const accepted = acceptedFiles(state.inboxItems, state.files);
+        if (accepted.length === 0) {
+          return;
+        }
+        await processIntake(accepted, addressInput.value.trim(), priceInput.value.trim());
+        state.files = [];
+        state.inboxItems = [];
+        folderInput.value = "";
+        filesInput.value = "";
+        renderInbox();
       } finally {
         analyzeBtn.disabled = false;
       }
@@ -950,6 +1046,20 @@ function initializeIntakeApp(): void {
     }
   });
 
+  inboxTable.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const itemId = target.getAttribute("data-id");
+    const decision = target.getAttribute("data-decision") as InboxDecision | null;
+    if (!itemId || !decision || !target.classList.contains("inbox-decision")) {
+      return;
+    }
+    setInboxDecision(itemId, decision);
+  });
+
   projectList.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
@@ -964,6 +1074,7 @@ function initializeIntakeApp(): void {
 
   renderProjectDashboard();
   renderProjectStatus();
+  renderInbox();
   if (state.projects.length > 0) {
     openProject(state.projects[0]?.id ?? "");
   }
