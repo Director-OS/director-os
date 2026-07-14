@@ -12,9 +12,9 @@
       <div>
         <p class="eyebrow">DIRECTOR OS</p>
         <h1>Listing Intake</h1>
-        <p class="sub">Drop an unnamed listing folder. Director audits the media and builds a review.</p>
+        <p class="sub">Drop an unnamed listing folder. Director audits all media and builds a launch-ready dashboard.</p>
       </div>
-      <span class="version">v0.1</span>
+      <span class="version">v0.2</span>
     </header>
 
     <section class="card intake">
@@ -31,17 +31,18 @@
     </section>
 
     <section id="progressCard" class="card hidden">
-      <h2>Analyzing media…</h2>
+      <h2>Analyzing media...</h2>
       <div class="progress"><div id="progressBar"></div></div>
       <p id="progressText">Preparing files</p>
     </section>
 
     <section id="results" class="hidden">
       <div class="score-grid">
-        <article class="card score-card"><span>Launch readiness</span><strong id="launchScore">—</strong><small id="launchLabel">—</small></article>
-        <article class="card score-card"><span>Photos</span><strong id="photoCount">0</strong><small id="photoStatus">—</small></article>
-        <article class="card score-card"><span>Videos</span><strong id="videoCount">0</strong><small id="videoStatus">—</small></article>
-        <article class="card score-card"><span>PDFs</span><strong id="pdfCount">0</strong><small>Brochures and one-pagers</small></article>
+        <article class="card score-card"><span>Launch readiness</span><strong id="launchScore">-</strong><small id="launchLabel">-</small></article>
+        <article class="card score-card"><span>Total files</span><strong id="fileCount">0</strong><small>All selected files analyzed</small></article>
+        <article class="card score-card"><span>Photos</span><strong id="photoCount">0</strong><small>Images</small></article>
+        <article class="card score-card"><span>Videos</span><strong id="videoCount">0</strong><small>Walkthrough or clips</small></article>
+        <article class="card score-card"><span>PDFs</span><strong id="pdfCount">0</strong><small>Brochure and handouts</small></article>
         <article class="card score-card"><span>Documents</span><strong id="documentCount">0</strong><small>Disclosures and notes</small></article>
         <article class="card score-card"><span>Other files</span><strong id="otherCount">0</strong><small>Unclassified uploads</small></article>
       </div>
@@ -50,21 +51,42 @@
         <article class="card">
           <h2>Director Review</h2>
           <dl>
-            <div><dt>Recommended story</dt><dd id="story">—</dd></div>
-            <div><dt>Primary angle</dt><dd id="angle">—</dd></div>
-            <div><dt>Recommended runtime</dt><dd id="runtime">—</dd></div>
+            <div><dt>Recommended story</dt><dd id="story">-</dd></div>
+            <div><dt>Likely buyer angle</dt><dd id="angle">-</dd></div>
+            <div><dt>Recommended runtime</dt><dd id="runtime">-</dd></div>
           </dl>
         </article>
         <article class="card">
           <h2>Missing media</h2>
           <ul id="missingMedia"></ul>
+          <h2>Missing shot checklist</h2>
+          <ul id="shotChecklist"></ul>
           <h2>Action items</h2>
           <ul id="actions"></ul>
         </article>
       </div>
 
       <article class="card">
-        <div class="section-head"><div><h2>Photo QA & hero ranking</h2><p>Technical scoring only; originals are never changed.</p></div><div class="button-row"><button id="downloadTextBtn" class="secondary">Download text report</button><button id="downloadJsonBtn" class="secondary">Download JSON report</button></div></div>
+        <div class="section-head">
+          <div>
+            <h2>Top 5 Hero Candidates</h2>
+            <p>Ranked with practical reasons based on browser-side analysis.</p>
+          </div>
+          <div class="button-row">
+            <button id="downloadTextBtn" class="secondary">Download text report</button>
+            <button id="downloadJsonBtn" class="secondary">Download JSON report</button>
+          </div>
+        </div>
+        <ul id="heroTop5" class="hero-list"></ul>
+      </article>
+
+      <article class="card">
+        <div class="section-head">
+          <div>
+            <h2>Photo QA and Scene Flags</h2>
+            <p>All photo files with thumbnail previews, score breakdowns, and likely scene tags.</p>
+          </div>
+        </div>
         <div id="photoTable" class="photo-table"></div>
       </article>
     </section>

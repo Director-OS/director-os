@@ -2,33 +2,26 @@ import {
   buildDirectorReview,
   classifyMedia,
   createTextReport,
+  isImageDescriptor,
   rankHeroCandidates,
   type FileDescriptor,
   type HeroCandidate,
   type IntakeSummary,
-  type PhotoMetrics
+  type PhotoMetrics,
+  type SceneTag
 } from "./intake-analysis.js";
 
 interface AppState {
   files: File[];
   summary: IntakeSummary | null;
+  heroCandidates: HeroCandidate[];
 }
 
 const state: AppState = {
   files: [],
-  summary: null
+  summary: null,
+  heroCandidates: []
 };
-
-const imageExtensions = new Set(["jpg", "jpeg", "png", "webp", "heic", "heif", "avif"]);
-
-function getExtension(fileName: string): string {
-  const parts = fileName.toLowerCase().split(".");
-  return parts[parts.length - 1] ?? "";
-}
-
-function isImageFile(file: File): boolean {
-  return file.type.startsWith("image/") || imageExtensions.has(getExtension(file.name));
-}
 
 function toMetricClass(value: number): "good" | "warn" | "bad" {
   if (value >= 75) {
@@ -38,6 +31,15 @@ function toMetricClass(value: number): "good" | "warn" | "bad" {
     return "warn";
   }
   return "bad";
+}
+
+function prettySceneTag(tag: SceneTag): string {
+  switch (tag) {
+    case "primary-bedroom":
+      return "primary bedroom";
+    default:
+      return tag;
+  }
 }
 
 function extractChannelMetrics(pixels: Uint8ClampedArray): {
@@ -102,7 +104,7 @@ async function analyzePhoto(file: File): Promise<PhotoMetrics> {
   const bitmap = await createImageBitmap(file);
   const originalWidth = bitmap.width;
   const originalHeight = bitmap.height;
-  const maxDimension = 360;
+  const maxDimension = 420;
   const scale = Math.min(maxDimension / bitmap.width, maxDimension / bitmap.height, 1);
   const width = Math.max(1, Math.round(bitmap.width * scale));
   const height = Math.max(1, Math.round(bitmap.height * scale));
@@ -123,6 +125,8 @@ async function analyzePhoto(file: File): Promise<PhotoMetrics> {
 
   return {
     fileName: file.name,
+    filePath: file.webkitRelativePath || file.name,
+    thumbnailUrl: URL.createObjectURL(file),
     width: originalWidth,
     height: originalHeight,
     brightness,
@@ -145,6 +149,28 @@ function setProgress(percent: number, text: string): void {
   }
 }
 
+function renderTopFive(candidates: HeroCandidate[]): void {
+  const topFive = document.getElementById("heroTop5");
+  if (!topFive) {
+    return;
+  }
+
+  topFive.innerHTML = "";
+  const leaders = candidates.slice(0, 5);
+  if (leaders.length === 0) {
+    const li = document.createElement("li");
+    li.textContent = "No hero candidates yet.";
+    topFive.appendChild(li);
+    return;
+  }
+
+  for (const candidate of leaders) {
+    const li = document.createElement("li");
+    li.textContent = `${candidate.fileName} (${candidate.heroScore}/100, ${prettySceneTag(candidate.sceneTag)}): ${candidate.reasons.join("; ")}`;
+    topFive.appendChild(li);
+  }
+}
+
 function renderPhotoTable(candidates: HeroCandidate[]): void {
   const table = document.getElementById("photoTable");
   if (!table) {
@@ -156,19 +182,24 @@ function renderPhotoTable(candidates: HeroCandidate[]): void {
     return;
   }
 
-  const rows = candidates.slice(0, 16).map((candidate, index) => {
+  const rows = candidates.map((candidate, index) => {
     const scoreClass = toMetricClass(candidate.heroScore);
-    const brightness = Math.round(candidate.brightness * 100);
-    const contrast = Math.round(candidate.contrast * 1000) / 10;
-    const sharpness = Math.round(candidate.sharpness);
+    const brightness = Math.round(candidate.brightnessScore);
+    const sharpness = Math.round(candidate.sharpnessScore);
+    const resolution = Math.round(candidate.resolutionScore);
+    const aspect = Math.round(candidate.aspectRatioScore);
 
     return `<div class="photo-row">
-      <div class="rank">#${index + 1}</div>
-      <div><strong>${candidate.fileName}</strong><small>${candidate.orientation} | ${candidate.width}x${candidate.height}</small></div>
-      <div class="metric ${scoreClass}">${candidate.heroScore}<small>Hero score</small></div>
-      <div class="metric hide-mobile">${brightness}<small>Brightness</small></div>
-      <div class="metric hide-mobile">${contrast}<small>Contrast</small></div>
+      <img class="thumb" src="${candidate.thumbnailUrl}" alt="${candidate.fileName}" />
+      <div>
+        <strong>#${index + 1} ${candidate.fileName}</strong>
+        <small>${prettySceneTag(candidate.sceneTag)} | ${candidate.width}x${candidate.height}</small>
+      </div>
+      <div class="metric ${scoreClass}">${candidate.heroScore}<small>Hero</small></div>
       <div class="metric hide-mobile">${sharpness}<small>Sharpness</small></div>
+      <div class="metric hide-mobile">${brightness}<small>Brightness</small></div>
+      <div class="metric hide-mobile">${resolution}<small>Resolution</small></div>
+      <div class="metric hide-mobile">${aspect}<small>Aspect</small></div>
     </div>`;
   });
 
@@ -223,6 +254,7 @@ function renderResults(summary: IntakeSummary): void {
 
   setText("launchScore", `${review.launchReadinessScore}`);
   setText("launchLabel", review.launchReadinessLabel);
+  setText("fileCount", `${summary.fileCount}`);
   setText("photoCount", `${summary.mediaCounts.photos}`);
   setText("videoCount", `${summary.mediaCounts.videos}`);
   setText("pdfCount", `${summary.mediaCounts.pdfs}`);
@@ -233,7 +265,9 @@ function renderResults(summary: IntakeSummary): void {
   setText("runtime", summary.mediaCounts.videos > 0 ? "30-60 second highlight cut" : "Capture teaser before launch");
 
   updateList("missingMedia", review.missingMedia, "No missing media detected.");
+  updateList("shotChecklist", review.missingShotChecklist, "No critical missing shot detected.");
   updateList("actions", review.actionItems, "No action items.");
+  renderTopFive(summary.heroCandidates);
   renderPhotoTable(summary.heroCandidates);
 
   const downloadTextBtn = document.getElementById("downloadTextBtn");
@@ -264,36 +298,43 @@ async function processIntake(files: File[], address: string, listPrice: string):
 
   const descriptors: FileDescriptor[] = files.map((file) => ({
     name: file.name,
+    path: file.webkitRelativePath || file.name,
     type: file.type,
     size: file.size
   }));
+
   const mediaCounts = classifyMedia(descriptors);
-  const photoFiles = files.filter((file) => isImageFile(file));
   const photoMetrics: PhotoMetrics[] = [];
 
-  for (let index = 0; index < photoFiles.length; index += 1) {
-    const file = photoFiles[index];
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
     if (!file) {
       continue;
     }
+
     setProgress(
-      Math.round((index / Math.max(photoFiles.length, 1)) * 100),
-      `Analyzing ${index + 1} of ${photoFiles.length} photos: ${file.name}`
+      Math.round(((index + 1) / Math.max(files.length, 1)) * 100),
+      `Analyzing file ${index + 1} of ${files.length}: ${file.name}`
     );
 
-    try {
-      const metrics = await analyzePhoto(file);
-      photoMetrics.push(metrics);
-    } catch {
-      // Continue analysis even if one media file cannot be decoded.
+    if (isImageDescriptor({ name: file.name, type: file.type })) {
+      try {
+        const metrics = await analyzePhoto(file);
+        photoMetrics.push(metrics);
+      } catch {
+        // Continue analysis even if one image cannot be decoded.
+      }
     }
   }
 
-  setProgress(100, "Generating Director review");
+  setProgress(100, "Generating complete Director dashboard");
   const heroCandidates = rankHeroCandidates(photoMetrics);
+  state.heroCandidates = heroCandidates;
+
   const summary: IntakeSummary = {
     address,
     listPrice,
+    fileCount: files.length,
     mediaCounts,
     heroCandidates,
     generatedAt: new Date().toISOString()
@@ -311,10 +352,9 @@ function assignFiles(files: File[]): void {
     analyzeBtn.disabled = files.length === 0;
   }
   if (dropzone) {
-    const photoCount = files.filter((file) => isImageFile(file)).length;
     const helperText = dropzone.querySelector("span");
     if (helperText) {
-      helperText.textContent = `${files.length} files selected (${photoCount} photos)`;
+      helperText.textContent = `${files.length} files selected`;
     }
   }
 }
