@@ -36,6 +36,8 @@ const MATTERPORT_KEYWORDS = ["matterport", "3d", "virtual-tour", "tour"];
 const DRONE_KEYWORDS = ["drone", "aerial", "birdseye", "bird-eye"];
 const BROCHURE_KEYWORDS = ["brochure", "flyer", "feature-sheet", "features"];
 const CONTRACT_KEYWORDS = [
+  "listing-agreement",
+  "listing agreement",
   "contract",
   "purchase-agreement",
   "agreement",
@@ -62,12 +64,18 @@ function normalizeName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }
 
+function normalizedPath(file: File): string {
+  const path = (file.webkitRelativePath || file.name).toLowerCase();
+  return path.replace(/[^a-z0-9/]+/g, "-");
+}
+
 function isDocumentLike(ext: string): boolean {
   return ["pdf", "doc", "docx", "txt", "rtf", "xlsx", "csv", "ppt", "pptx"].includes(ext);
 }
 
 function classifyKind(file: File): { kind: InboxKind; confidence: number; reasons: string[] } {
   const name = normalizeName(file.name);
+  const path = normalizedPath(file);
   const ext = extension(file.name);
   const reasons: string[] = [];
 
@@ -81,27 +89,30 @@ function classifyKind(file: File): { kind: InboxKind; confidence: number; reason
     return { kind: "video", confidence: 0.95, reasons };
   }
 
-  if (MATTERPORT_KEYWORDS.some((keyword) => name.includes(keyword))) {
+  if (MATTERPORT_KEYWORDS.some((keyword) => name.includes(keyword) || path.includes(keyword))) {
     reasons.push("Matterport keyword match");
     return { kind: "matterport", confidence: 0.92, reasons };
   }
 
-  if (FLOOR_PLAN_KEYWORDS.some((keyword) => name.includes(keyword)) && (ext === "pdf" || EDITED_EXTENSIONS.has(ext))) {
+  if (
+    FLOOR_PLAN_KEYWORDS.some((keyword) => name.includes(keyword) || path.includes(`/${keyword}`) || path.includes(`-${keyword}`)) &&
+    (ext === "pdf" || EDITED_EXTENSIONS.has(ext))
+  ) {
     reasons.push("Floor plan keyword match");
     return { kind: "floor-plan", confidence: 0.9, reasons };
   }
 
-  if (DRONE_KEYWORDS.some((keyword) => name.includes(keyword))) {
+  if (DRONE_KEYWORDS.some((keyword) => name.includes(keyword) || path.includes(keyword))) {
     reasons.push("Drone keyword match");
     return { kind: "drone", confidence: 0.88, reasons };
   }
 
-  if (BROCHURE_KEYWORDS.some((keyword) => name.includes(keyword)) && ext === "pdf") {
+  if (BROCHURE_KEYWORDS.some((keyword) => name.includes(keyword) || path.includes(keyword)) && ext === "pdf") {
     reasons.push("Brochure keyword match");
     return { kind: "brochure", confidence: 0.9, reasons };
   }
 
-  if (CONTRACT_KEYWORDS.some((keyword) => name.includes(keyword)) && isDocumentLike(ext)) {
+  if (CONTRACT_KEYWORDS.some((keyword) => name.includes(keyword) || path.includes(keyword)) && isDocumentLike(ext)) {
     reasons.push("Contract/document keyword match");
     return { kind: "contract", confidence: 0.93, reasons };
   }
@@ -128,6 +139,14 @@ function normalizeStem(path: string): string {
     .replace(/-\d+\b/g, "");
 }
 
+function isRawKind(kind: InboxKind): boolean {
+  return kind === "raw";
+}
+
+function isEditedKind(kind: InboxKind): boolean {
+  return kind === "edited";
+}
+
 export function buildInbox(files: File[], alreadyAnalyzedPaths: Set<string>): InboxItem[] {
   const initial = files.map((file) => {
     const filePath = file.webkitRelativePath || file.name;
@@ -138,8 +157,8 @@ export function buildInbox(files: File[], alreadyAnalyzedPaths: Set<string>): In
 
     if (cls.kind === "contract" || cls.kind === "document") {
       decision = "ignore";
-      recommendation = "Ignored automatically: likely contract or unrelated document.";
-      locked = true;
+      recommendation = "Ignored by default: likely contract or unrelated document. You can manually include it.";
+      locked = false;
     } else if (cls.kind === "unknown") {
       decision = "reject";
       recommendation = "Unknown file type. Review before importing.";
@@ -179,18 +198,25 @@ export function buildInbox(files: File[], alreadyAnalyzedPaths: Set<string>): In
   }
 
   for (const [, group] of byStem) {
-    const hasRaw = group.some((item) => item.kind === "raw");
-    const edited = group.filter((item) => item.kind === "edited");
+    const hasRaw = group.some((item) => isRawKind(item.kind));
+    const edited = group.filter((item) => isEditedKind(item.kind));
 
     if (hasRaw && edited.length > 0) {
+      const editedTopConfidence = Math.max(...edited.map((item) => item.confidence));
       for (const item of group) {
-        if (item.kind === "raw") {
-          item.recommendation = "RAW + edited pair found. Keep RAW for future auto-editing, but prioritize edited for publish.";
+        if (isRawKind(item.kind)) {
+          item.recommendation =
+            editedTopConfidence >= 0.8
+              ? "RAW + edited pair found. Keep RAW for archive and prioritize edited for publish."
+              : "RAW + edited pair found but edited confidence is low. Review both before publish.";
           item.autoEditCandidate = true;
         }
 
-        if (item.kind === "edited") {
-          item.recommendation = "RAW + edited pair found. Prefer edited version for immediate analysis and launch.";
+        if (isEditedKind(item.kind)) {
+          item.recommendation =
+            editedTopConfidence >= 0.8
+              ? "RAW + edited pair found. Prefer edited version for immediate analysis and launch."
+              : "RAW + edited pair found, but edited confidence is low. Confirm quality before launch.";
           item.decision = "accept";
         }
       }

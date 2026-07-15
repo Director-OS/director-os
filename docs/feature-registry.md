@@ -41,6 +41,7 @@
 - Status: Active
 - Categories:
   - exterior-front
+  - exterior-side
   - exterior-rear
   - aerial
   - kitchen
@@ -48,6 +49,7 @@
   - living-room
   - family-room
   - primary-bedroom
+  - primary-bathroom
   - secondary-bedroom
   - bathroom
   - basement
@@ -93,3 +95,10 @@
 - Formats:
   - text report
   - JSON report
+
+## Tour Workspace
+
+### Matterport and 3D Tour Links
+
+- Status: Active
+- Summary: Stores validated Matterport, Zillow 3D, and virtual tour URLs with each project for future AI tour evaluation.

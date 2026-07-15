@@ -46,6 +46,7 @@
       <div class="workspace-layout">
         <nav id="workspaceNav" class="workspace-nav">
           <button type="button" class="active-project" data-workspace-view="overview">Overview</button>
+          <button type="button" data-workspace-view="walkthrough">Walkthrough <span id="walkthroughNewFactsIndicator" class="inline-indicator">0 new facts</span> <span id="walkthroughNeedsVerificationIndicator" class="inline-indicator">0 needs verification</span></button>
           <button type="button" data-workspace-view="inbox">Inbox</button>
           <button type="button" data-workspace-view="photos">Photos</button>
           <button type="button" data-workspace-view="drone">Drone</button>
@@ -230,6 +231,120 @@
         <p id="overviewNextAction">-</p>
       </article>
 
+      <article class="card" data-workspace-panel="walkthrough">
+        <div class="section-head">
+          <div>
+            <h2>Director Walkthrough</h2>
+            <p>Capture or import listing appointment audio, transcribe, extract facts, and review certainty before publishing.</p>
+          </div>
+        </div>
+
+        <div class="consent-reminder">
+          <strong>Recording consent reminder:</strong>
+          <p>Confirm consent before recording. Follow all applicable recording-consent laws and your company policy.</p>
+          <label><input id="walkthroughConsent" type="checkbox" /> I have confirmed recording consent for this appointment.</label>
+        </div>
+
+        <div class="walkthrough-actions">
+          <label>Transcription mode
+            <select id="walkthroughTranscriptionMode">
+              <option value="mock-local">Mock local transcript (no API key)</option>
+              <option value="uploaded-text">Use uploaded transcript text</option>
+            </select>
+          </label>
+          <button id="walkthroughStartBtn" type="button">Start Recording</button>
+          <button id="walkthroughPauseBtn" type="button" class="secondary" disabled>Pause</button>
+          <button id="walkthroughResumeBtn" type="button" class="secondary" disabled>Resume</button>
+          <button id="walkthroughStopBtn" type="button" class="secondary" disabled>Stop</button>
+          <button id="walkthroughSaveBtn" type="button" class="secondary" disabled>Save Walkthrough</button>
+          <label class="secondary upload-btn" for="walkthroughImportInput">Import Audio/Transcript</label>
+          <input id="walkthroughImportInput" type="file" accept="audio/*,.txt,.md,.markdown,.json" multiple />
+        </div>
+
+        <div class="walkthrough-status-grid">
+          <article class="status-item"><span>Recording status</span><strong id="walkthroughRecordingStatus">Idle</strong></article>
+          <article class="status-item"><span>Elapsed</span><strong id="walkthroughElapsed">00:00</strong></article>
+          <article class="status-item"><span>Browser support</span><strong id="walkthroughSupport">Unknown</strong></article>
+          <article class="status-item"><span>Last message</span><strong id="walkthroughStatusMessage">Ready.</strong></article>
+        </div>
+
+        <div class="walkthrough-grid">
+          <section class="card walkthrough-card">
+            <h3>Recording and Import History</h3>
+            <ul id="walkthroughHistory"></ul>
+          </section>
+
+          <section class="card walkthrough-card">
+            <h3>Transcript</h3>
+            <label>Search transcript<input id="walkthroughTranscriptSearch" type="text" placeholder="Search transcript text" /></label>
+            <div id="walkthroughTranscriptMatches" class="match-list"></div>
+            <h4>Original Transcript</h4>
+            <pre id="walkthroughOriginalTranscript" class="transcript-block">No transcript selected.</pre>
+            <h4>Editable Transcript</h4>
+            <textarea id="walkthroughEditedTranscript" rows="10"></textarea>
+            <button id="walkthroughSaveTranscriptEdit" type="button" class="secondary">Save Transcript Edit</button>
+          </section>
+
+          <section class="card walkthrough-card">
+            <h3>Fact Review</h3>
+            <div id="walkthroughFacts"></div>
+            <h4>Add Missing Fact</h4>
+            <label>Category<input id="walkthroughManualFactCategory" type="text" placeholder="e.g., Roof" /></label>
+            <label>Value<input id="walkthroughManualFactValue" type="text" placeholder="e.g., Replaced in 2019" /></label>
+            <label>Quote<textarea id="walkthroughManualFactQuote" rows="3" placeholder="Supporting note or quote"></textarea></label>
+            <label>Status
+              <select id="walkthroughManualFactStatus">
+                <option value="Confirmed">Confirmed</option>
+                <option value="Needs Verification">Needs Verification</option>
+                <option value="Uncertain">Uncertain</option>
+              </select>
+            </label>
+            <button id="walkthroughAddManualFact" type="button" class="secondary">Add Missing Fact</button>
+          </section>
+        </div>
+
+        <div class="walkthrough-grid">
+          <section class="card walkthrough-card">
+            <h3>Listing Debrief</h3>
+            <div id="walkthroughDebrief"></div>
+          </section>
+          <section class="card walkthrough-card">
+            <h3>Conflicts</h3>
+            <ul id="walkthroughConflicts"></ul>
+          </section>
+          <section class="card walkthrough-card">
+            <h3>Project Walkthrough Search</h3>
+            <label>Search walkthrough intelligence<input id="walkthroughProjectSearch" type="text" placeholder="roof, HVAC, price, HOA" /></label>
+            <div id="walkthroughProjectSearchResults"></div>
+          </section>
+        </div>
+
+        <div class="walkthrough-grid">
+          <section class="card walkthrough-card">
+            <h3>Timeline</h3>
+            <div id="walkthroughTimeline"></div>
+          </section>
+          <section class="card walkthrough-card">
+            <h3>Property Fact Panel</h3>
+            <div id="walkthroughPropertyFacts"></div>
+          </section>
+          <section class="card walkthrough-card">
+            <h3>Seller Discussion Summary</h3>
+            <ul id="walkthroughSellerSummary"></ul>
+            <h4>Suggested Follow-up Questions</h4>
+            <ul id="walkthroughFollowUpQuestions"></ul>
+          </section>
+        </div>
+
+        <div class="walkthrough-grid">
+          <section class="card walkthrough-card">
+            <h3>Listing Notes</h3>
+            <textarea id="walkthroughListingNotes" rows="6" placeholder="Capture listing notes, seller context, and decisions..."></textarea>
+            <button id="walkthroughSaveNotes" type="button" class="secondary">Save Listing Notes</button>
+          </section>
+        </div>
+      </article>
+
       <article class="card" data-workspace-panel="photos">
         <div class="section-head">
           <div>
@@ -263,8 +378,18 @@
       </article>
 
       <article class="card" data-workspace-panel="tour">
-        <h2>3D Tour Workspace</h2>
-        <p>Tour assets detected: <strong id="tourCount">0</strong></p>
+        <h2>Matterport and 3D Tour Workspace</h2>
+        <p>Tour assets and links detected: <strong id="tourCount">0</strong></p>
+        <div class="fields">
+          <label>Matterport URL<input id="matterportUrl" type="url" placeholder="https://my.matterport.com/show/?m=..." /></label>
+          <label>Zillow 3D URL<input id="zillow3dUrl" type="url" placeholder="https://www.zillow.com/view-3d-home/..." /></label>
+        </div>
+        <label>Virtual tour URL<input id="virtualTourUrl" type="url" placeholder="https://example.com/virtual-tour" /></label>
+        <div class="button-row">
+          <button id="saveTourLinks" type="button" class="secondary">Validate and Save Tour Links</button>
+        </div>
+        <p id="tourLinkStatus" class="workspace-hint">No tour links saved yet.</p>
+        <p class="workspace-hint">Architecture note: saved links are persisted with the project for future AI-based tour evaluation.</p>
       </article>
 
       <article class="card" data-workspace-panel="documents">
@@ -288,6 +413,17 @@
       </article>
     </section>
   </main>
+
+  <div id="photoPreviewModal" class="preview-modal hidden" role="dialog" aria-modal="true" aria-label="Photo preview">
+    <div class="preview-panel">
+      <div class="section-head">
+        <h2 id="photoPreviewTitle">Photo Preview</h2>
+        <button id="closePhotoPreview" type="button" class="secondary">Close</button>
+      </div>
+      <img id="photoPreviewImage" src="" alt="Photo preview" />
+    </div>
+  </div>
+
   <script type="module" src="apps/web/dist/main.js"></script>
 </body>
 </html>

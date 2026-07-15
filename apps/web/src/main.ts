@@ -22,11 +22,14 @@ import {
   listProjects,
   loadProject,
   mergeAssessmentsWithHistory,
+  projectFacts,
   projectSummaryFromStored,
   pushProjectActivity,
   saveProject,
   syncUploadIntoProject,
+  upsertProjectWalkthrough,
   updateMediaMetrics,
+  walkthroughIndicators,
   type DirectorProject
 } from "./projects.js";
 import {
@@ -36,10 +39,28 @@ import {
   type InboxDecision,
   type InboxItem
 } from "./inbox.js";
+import { getTranscriptionProvider } from "./transcription.js";
+import {
+  addManualFact,
+  applyFactDecisionToWalkthrough,
+  createWalkthroughRecord,
+  detectFactConflicts,
+  formatTimestamp,
+  parseTranscriptImport,
+  searchWalkthrough,
+  transitionRecorderState,
+  updateWalkthroughTranscript,
+  type FactDecision,
+  type FactStatus,
+  type RecorderStatus,
+  type WalkthroughRecord,
+  type WalkthroughSearchResult
+} from "./walkthrough.js";
 
 type FilterTag = "all" | "recommended" | "needs-work" | "remove";
 type WorkspaceView =
   | "overview"
+  | "walkthrough"
   | "inbox"
   | "photos"
   | "drone"
@@ -54,6 +75,7 @@ type WorkspaceView =
 
 const WORKSPACE_VIEWS: WorkspaceView[] = [
   "overview",
+  "walkthrough",
   "inbox",
   "photos",
   "drone",
@@ -95,6 +117,19 @@ interface AppState {
   inboxKindFilter: string;
   inboxDecisionFilter: string;
   selectedPhotoPath: string | null;
+  selectedWalkthroughId: string | null;
+  walkthroughTranscriptQuery: string;
+  walkthroughProjectQuery: string;
+  recordingStatus: RecorderStatus;
+  recordingElapsedMs: number;
+  pendingAudioBlob: Blob | null;
+  pendingAudioMimeType: string | null;
+  recordingChunks: Blob[];
+  recordingStartedAtMs: number | null;
+  recordingTimerId: number | null;
+  recorder: MediaRecorder | null;
+  recordingStream: MediaStream | null;
+  transcriptionMode: string;
 }
 
 const state: AppState = {
@@ -111,7 +146,20 @@ const state: AppState = {
   inboxSearch: "",
   inboxKindFilter: "all",
   inboxDecisionFilter: "all",
-  selectedPhotoPath: null
+  selectedPhotoPath: null,
+  selectedWalkthroughId: null,
+  walkthroughTranscriptQuery: "",
+  walkthroughProjectQuery: "",
+  recordingStatus: "idle",
+  recordingElapsedMs: 0,
+  pendingAudioBlob: null,
+  pendingAudioMimeType: null,
+  recordingChunks: [],
+  recordingStartedAtMs: null,
+  recordingTimerId: null,
+  recorder: null,
+  recordingStream: null,
+  transcriptionMode: "mock-local"
 };
 
 function toMetricClass(value: number): "good" | "warn" | "bad" {
@@ -130,6 +178,101 @@ function prettySceneTag(tag: SceneTag): string {
 
 function formatConfidence(value: number): string {
   return `${Math.round(value * 100)}%`;
+}
+
+function prettyFileName(fileName: string): string {
+  const base = fileName.replace(/\.[a-z0-9]+$/i, "");
+  const cleaned = base
+    .replace(/[_-]+/g, " ")
+    .replace(/\b(img|dsc|photo|edit|edited|final|retouched)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleaned.length > 0 ? cleaned.replace(/\b\w/g, (match) => match.toUpperCase()) : fileName;
+}
+
+function isFloorPlanPath(path: string): boolean {
+  const normalized = path.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  return ["floorplan", "floor-plan", "floor_plan", "fp", "plan"].some((keyword) => normalized.includes(keyword));
+}
+
+function validateTourUrl(value: string): { valid: boolean; reason: string } {
+  if (!value.trim()) {
+    return { valid: true, reason: "" };
+  }
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return { valid: false, reason: "Only http/https URLs are supported." };
+    }
+    return { valid: true, reason: "" };
+  } catch {
+    return { valid: false, reason: "Invalid URL format." };
+  }
+}
+
+async function collectDroppedFiles(dataTransfer: DataTransfer | null): Promise<File[]> {
+  if (!dataTransfer) {
+    return [];
+  }
+
+  const direct = Array.from(dataTransfer.files ?? []);
+  const items = Array.from(dataTransfer.items ?? []);
+  const hasEntries = items.some((item) => typeof (item as DataTransferItem & { webkitGetAsEntry?: () => unknown }).webkitGetAsEntry === "function");
+
+  if (!hasEntries) {
+    return direct;
+  }
+
+  const collected: File[] = [];
+
+  const readFileEntry = async (entry: FileSystemFileEntry): Promise<void> => {
+    await new Promise<void>((resolve) => {
+      entry.file(
+        (file) => {
+          collected.push(file);
+          resolve();
+        },
+        () => resolve()
+      );
+    });
+  };
+
+  const readDirectoryEntry = async (entry: FileSystemDirectoryEntry): Promise<void> => {
+    const reader = entry.createReader();
+    const readEntries = async (): Promise<FileSystemEntry[]> => {
+      return await new Promise<FileSystemEntry[]>((resolve) => {
+        reader.readEntries((entries) => resolve(entries), () => resolve([]));
+      });
+    };
+
+    while (true) {
+      const entries = await readEntries();
+      if (entries.length === 0) {
+        break;
+      }
+      for (const child of entries) {
+        if (child.isFile) {
+          await readFileEntry(child as FileSystemFileEntry);
+        } else if (child.isDirectory) {
+          await readDirectoryEntry(child as FileSystemDirectoryEntry);
+        }
+      }
+    }
+  };
+
+  for (const item of items) {
+    const entry = (item as DataTransferItem & { webkitGetAsEntry?: () => FileSystemEntry | null }).webkitGetAsEntry?.();
+    if (!entry) {
+      continue;
+    }
+    if (entry.isFile) {
+      await readFileEntry(entry as FileSystemFileEntry);
+    } else if (entry.isDirectory) {
+      await readDirectoryEntry(entry as FileSystemDirectoryEntry);
+    }
+  }
+
+  return collected.length > 0 ? collected : direct;
 }
 
 function extractChannelMetrics(pixels: Uint8ClampedArray): {
@@ -330,6 +473,39 @@ function setText(id: string, value: string): void {
   }
 }
 
+function photoByPath(path: string): PhotoAssessment | null {
+  return effectivePhotos().find((photo) => photo.filePath === path) ?? null;
+}
+
+function focusPhoto(path: string): void {
+  state.selectedPhotoPath = path;
+  setWorkspaceView("photos");
+  renderPhotoWorkspace();
+}
+
+function openImagePreview(photo: PhotoAssessment): void {
+  const modal = document.getElementById("photoPreviewModal");
+  const image = document.getElementById("photoPreviewImage") as HTMLImageElement | null;
+  const title = document.getElementById("photoPreviewTitle");
+  if (!modal || !image || !title) {
+    return;
+  }
+  image.src = photo.thumbnailUrl;
+  image.alt = prettyFileName(photo.fileName);
+  title.textContent = `${prettyFileName(photo.fileName)} | ${photo.width}x${photo.height}`;
+  modal.classList.remove("hidden");
+}
+
+function closeImagePreview(): void {
+  const modal = document.getElementById("photoPreviewModal");
+  const image = document.getElementById("photoPreviewImage") as HTMLImageElement | null;
+  if (!modal || !image) {
+    return;
+  }
+  modal.classList.add("hidden");
+  image.src = "";
+}
+
 function currentProject(): DirectorProject | null {
   if (!state.currentProjectId) {
     return null;
@@ -337,8 +513,175 @@ function currentProject(): DirectorProject | null {
   return loadProject(state.currentProjectId);
 }
 
+function ensureCurrentProject(): DirectorProject | null {
+  const existing = currentProject();
+  if (existing) {
+    return existing;
+  }
+
+  const addressInput = document.getElementById("address") as HTMLInputElement | null;
+  const priceInput = document.getElementById("price") as HTMLInputElement | null;
+  const address = addressInput?.value.trim() ?? "";
+  const price = priceInput?.value.trim() ?? "";
+  if (!address) {
+    const msg = "Property address is required before creating a project.";
+    setText("inboxSummary", msg);
+    return null;
+  }
+
+  const created = getOrCreateProject(address, price);
+  state.currentProjectId = created.id;
+  state.selectedWalkthroughId = created.walkthroughs[0]?.id ?? null;
+  renderProjectDashboard();
+  renderProjectStatus();
+  return created;
+}
+
 function refreshProjects(): void {
   state.projects = listProjects();
+}
+
+function currentWalkthrough(): WalkthroughRecord | null {
+  const project = currentProject();
+  if (!project) {
+    return null;
+  }
+  if (!state.selectedWalkthroughId) {
+    return project.walkthroughs[0] ?? null;
+  }
+  return project.walkthroughs.find((item) => item.id === state.selectedWalkthroughId) ?? project.walkthroughs[0] ?? null;
+}
+
+function formatElapsed(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60)
+    .toString()
+    .padStart(2, "0");
+  const remainder = (seconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${remainder}`;
+}
+
+function setRecordingStatusMessage(message: string): void {
+  setText("walkthroughStatusMessage", message);
+}
+
+function isMediaRecorderSupported(): boolean {
+  return typeof window !== "undefined" && typeof window.MediaRecorder !== "undefined" && typeof navigator?.mediaDevices?.getUserMedia === "function";
+}
+
+function setRecordingStatus(next: RecorderStatus): void {
+  state.recordingStatus = next;
+  setText("walkthroughRecordingStatus", next.replace(/^[a-z]/, (match) => match.toUpperCase()));
+
+  const start = document.getElementById("walkthroughStartBtn") as HTMLButtonElement | null;
+  const pause = document.getElementById("walkthroughPauseBtn") as HTMLButtonElement | null;
+  const resume = document.getElementById("walkthroughResumeBtn") as HTMLButtonElement | null;
+  const stop = document.getElementById("walkthroughStopBtn") as HTMLButtonElement | null;
+  const save = document.getElementById("walkthroughSaveBtn") as HTMLButtonElement | null;
+  if (!start || !pause || !resume || !stop || !save) {
+    return;
+  }
+
+  const isRecording = next === "recording";
+  const isPaused = next === "paused";
+  const canSave = next === "stopped" && state.pendingAudioBlob !== null;
+
+  start.disabled = isRecording || isPaused;
+  pause.disabled = !isRecording;
+  resume.disabled = !isPaused;
+  stop.disabled = !(isRecording || isPaused);
+  save.disabled = !canSave;
+}
+
+function stopRecordingTicker(): void {
+  if (state.recordingTimerId !== null) {
+    window.clearInterval(state.recordingTimerId);
+    state.recordingTimerId = null;
+  }
+}
+
+function startRecordingTicker(): void {
+  stopRecordingTicker();
+  state.recordingStartedAtMs = Date.now() - state.recordingElapsedMs;
+  state.recordingTimerId = window.setInterval(() => {
+    if (state.recordingStartedAtMs === null) {
+      return;
+    }
+    state.recordingElapsedMs = Date.now() - state.recordingStartedAtMs;
+    setText("walkthroughElapsed", formatElapsed(state.recordingElapsedMs));
+  }, 250);
+}
+
+function updateWalkthroughIndicators(): void {
+  const project = currentProject();
+  const indicators = project ? walkthroughIndicators(project) : { newFacts: 0, needsVerification: 0 };
+  setText("walkthroughNewFactsIndicator", `${indicators.newFacts} new facts`);
+  setText("walkthroughNeedsVerificationIndicator", `${indicators.needsVerification} needs verification`);
+}
+
+function saveWalkthroughToProject(walkthrough: WalkthroughRecord, activityMessage: string): void {
+  const project = currentProject();
+  if (!project) {
+    return;
+  }
+
+  const existingFacts = projectFacts(project).filter((fact) => fact.sourceWalkthroughId !== walkthrough.id);
+  const withConflicts = {
+    ...walkthrough,
+    conflicts: detectFactConflicts(walkthrough.facts, existingFacts)
+  };
+
+  let updated = upsertProjectWalkthrough(project, withConflicts);
+  updated = pushProjectActivity(updated, {
+    type: "walkthrough",
+    message: activityMessage
+  });
+  saveProject(updated);
+  state.selectedWalkthroughId = withConflicts.id;
+  renderProjectDashboard();
+  renderProjectStatus();
+  renderActivityFeed();
+  updateWalkthroughIndicators();
+}
+
+function walkthroughSearchAcrossProject(project: DirectorProject, query: string): WalkthroughSearchResult {
+  const aggregate: WalkthroughSearchResult = {
+    transcriptMatches: [],
+    factMatches: [],
+    relatedTasks: [],
+    relatedRisks: []
+  };
+
+  for (const walkthrough of project.walkthroughs) {
+    const result = searchWalkthrough(walkthrough, query);
+    aggregate.transcriptMatches.push(...result.transcriptMatches);
+    aggregate.factMatches.push(...result.factMatches);
+    aggregate.relatedTasks.push(...result.relatedTasks);
+    aggregate.relatedRisks.push(...result.relatedRisks);
+  }
+
+  return {
+    transcriptMatches: aggregate.transcriptMatches.slice(0, 20),
+    factMatches: aggregate.factMatches.slice(0, 20),
+    relatedTasks: aggregate.relatedTasks.slice(0, 20),
+    relatedRisks: aggregate.relatedRisks.slice(0, 20)
+  };
+}
+
+async function blobToDataUrl(blob: Blob): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const value = reader.result;
+      if (typeof value === "string") {
+        resolve(value);
+      } else {
+        reject(new Error("Failed to convert blob to data URL"));
+      }
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("FileReader error"));
+    reader.readAsDataURL(blob);
+  });
 }
 
 function renderProjectDashboard(): void {
@@ -480,10 +823,11 @@ function renderAssetPanels(): void {
   }
 
   const media = activeMedia(project);
-  const byName = (needle: string) => media.filter((item) => item.fileName.toLowerCase().includes(needle));
+  const byName = (needle: string) => media.filter((item) => `${item.fileName} ${item.filePath}`.toLowerCase().includes(needle));
   const drone = byName("drone").length + byName("aerial").length;
-  const floorPlans = byName("floorplan").length + byName("floor-plan").length + byName("plan").length;
-  const tours = byName("matterport").length + byName("tour").length;
+  const floorPlans = media.filter((item) => isFloorPlanPath(item.filePath)).length;
+  const linkedTours = [project.tourLinks.matterportUrl, project.tourLinks.zillow3dUrl, project.tourLinks.virtualTourUrl].filter(Boolean).length;
+  const tours = byName("matterport").length + byName("tour").length + linkedTours;
   const docs = media.filter((item) => ["pdf", "doc", "docx", "txt", "rtf"].some((ext) => item.fileName.toLowerCase().endsWith(`.${ext}`))).length;
   const videos = media.filter((item) => ["mp4", "mov", "m4v", "avi", "mkv", "webm"].some((ext) => item.fileName.toLowerCase().endsWith(`.${ext}`))).length;
   const readyForMls = Object.entries(state.overrides).filter(([, value]) => Boolean(value.readyForMls)).length;
@@ -494,6 +838,195 @@ function renderAssetPanels(): void {
   setText("tourCount", `${tours}`);
   setText("documentWorkspaceCount", `${docs}`);
   setText("mlsReadyPhotos", `${readyForMls}`);
+}
+
+function renderTourWorkspace(): void {
+  const project = currentProject();
+  const matterportInput = document.getElementById("matterportUrl") as HTMLInputElement | null;
+  const zillowInput = document.getElementById("zillow3dUrl") as HTMLInputElement | null;
+  const virtualTourInput = document.getElementById("virtualTourUrl") as HTMLInputElement | null;
+  const status = document.getElementById("tourLinkStatus");
+  if (!matterportInput || !zillowInput || !virtualTourInput || !status) {
+    return;
+  }
+
+  matterportInput.value = project?.tourLinks.matterportUrl ?? "";
+  zillowInput.value = project?.tourLinks.zillow3dUrl ?? "";
+  virtualTourInput.value = project?.tourLinks.virtualTourUrl ?? "";
+
+  if (!project) {
+    status.textContent = "Open or create a project to save tour links.";
+    return;
+  }
+
+  const values = [project.tourLinks.matterportUrl, project.tourLinks.zillow3dUrl, project.tourLinks.virtualTourUrl].filter(Boolean);
+  status.textContent = values.length > 0
+    ? `Stored ${values.length} tour link(s). Architecture ready for future AI tour evaluation.`
+    : "No tour links saved yet.";
+}
+
+function renderWalkthroughWorkspace(): void {
+  const project = currentProject();
+  const history = document.getElementById("walkthroughHistory");
+  const original = document.getElementById("walkthroughOriginalTranscript");
+  const edited = document.getElementById("walkthroughEditedTranscript") as HTMLTextAreaElement | null;
+  const factsEl = document.getElementById("walkthroughFacts");
+  const debriefEl = document.getElementById("walkthroughDebrief");
+  const conflictsEl = document.getElementById("walkthroughConflicts");
+  const matchesEl = document.getElementById("walkthroughTranscriptMatches");
+  const projectSearchEl = document.getElementById("walkthroughProjectSearchResults");
+  const support = document.getElementById("walkthroughSupport");
+  const timelineEl = document.getElementById("walkthroughTimeline");
+  const propertyFactsEl = document.getElementById("walkthroughPropertyFacts");
+  const sellerSummaryEl = document.getElementById("walkthroughSellerSummary");
+  const followUpEl = document.getElementById("walkthroughFollowUpQuestions");
+  const listingNotesEl = document.getElementById("walkthroughListingNotes") as HTMLTextAreaElement | null;
+  if (
+    !history ||
+    !original ||
+    !edited ||
+    !factsEl ||
+    !debriefEl ||
+    !conflictsEl ||
+    !matchesEl ||
+    !projectSearchEl ||
+    !support ||
+    !timelineEl ||
+    !propertyFactsEl ||
+    !sellerSummaryEl ||
+    !followUpEl ||
+    !listingNotesEl
+  ) {
+    return;
+  }
+
+  support.textContent = isMediaRecorderSupported() ? "MediaRecorder supported" : "MediaRecorder unavailable";
+  setText("walkthroughElapsed", formatElapsed(state.recordingElapsedMs));
+  setRecordingStatus(state.recordingStatus);
+
+  const walkthroughs = project?.walkthroughs ?? [];
+  history.innerHTML = "";
+  if (walkthroughs.length === 0) {
+    const li = document.createElement("li");
+    li.textContent = "No walkthroughs saved yet.";
+    history.appendChild(li);
+  } else {
+    for (const walkthrough of walkthroughs) {
+      const li = document.createElement("li");
+      li.innerHTML = `<button type="button" class="secondary ${state.selectedWalkthroughId === walkthrough.id ? "active-project" : ""}" data-walkthrough-select="${walkthrough.id}">${walkthrough.title} | ${new Date(walkthrough.updatedAt).toLocaleString()}</button>`;
+      history.appendChild(li);
+    }
+  }
+
+  const selected = currentWalkthrough();
+  if (!selected) {
+    original.textContent = "No transcript selected.";
+    edited.value = "";
+    factsEl.innerHTML = "<p>No extracted facts yet.</p>";
+    debriefEl.innerHTML = "<p>No debrief available.</p>";
+    conflictsEl.innerHTML = "<li>No conflicts detected.</li>";
+    matchesEl.innerHTML = "";
+    projectSearchEl.innerHTML = "";
+    timelineEl.innerHTML = "<p>No timeline available.</p>";
+    propertyFactsEl.innerHTML = "<p>No property facts extracted yet.</p>";
+    sellerSummaryEl.innerHTML = "<p>No seller summary available.</p>";
+    followUpEl.innerHTML = "<p>No follow-up questions yet.</p>";
+    listingNotesEl.value = project?.listingNotes ?? "";
+    updateWalkthroughIndicators();
+    return;
+  }
+
+  state.selectedWalkthroughId = selected.id;
+  original.textContent = selected.transcript.originalText || "No original transcript.";
+  if (document.activeElement !== edited) {
+    edited.value = selected.transcript.editedText;
+  }
+  if (document.activeElement !== listingNotesEl) {
+    listingNotesEl.value = project?.listingNotes ?? "";
+  }
+
+  const factRows = selected.facts
+    .map((fact) => {
+      const timestamp = formatTimestamp(fact.transcriptTimestampMs);
+      return `<article class="fact-item" data-fact-id="${fact.id}">
+        <strong>${fact.category}</strong>
+        <p><strong>Value:</strong> ${fact.correctedValue ?? fact.value}</p>
+        <p><strong>Quote:</strong> ${fact.quote}</p>
+        <small>Time ${timestamp} | Confidence ${Math.round(fact.confidence * 100)}% | Status ${fact.status} | Decision ${fact.decision}</small>
+        <div class="fact-actions">
+          <button type="button" class="secondary" data-fact-action="confirmed" data-fact-id="${fact.id}">Confirm</button>
+          <button type="button" class="secondary" data-fact-action="rejected" data-fact-id="${fact.id}">Reject</button>
+          <button type="button" class="secondary" data-fact-action="follow-up" data-fact-id="${fact.id}">Follow-up</button>
+          <input type="text" placeholder="Corrected value" data-corrected-value="${fact.id}" />
+          <button type="button" class="secondary" data-fact-action="corrected" data-fact-id="${fact.id}">Correct</button>
+        </div>
+      </article>`;
+    })
+    .join("");
+  factsEl.innerHTML = factRows || "<p>No extracted facts yet.</p>";
+
+  debriefEl.innerHTML = selected.debrief
+    .map(
+      (section) => `<article class="fact-item"><strong>${section.title}</strong><ul>${section.lines
+        .map((line) => `<li>${line.text}${line.factId ? ` <small>(fact ${line.factId})</small>` : ""}</li>`)
+        .join("")}</ul></article>`
+    )
+    .join("");
+
+  conflictsEl.innerHTML =
+    selected.conflicts.length === 0
+      ? "<li>No conflicts detected.</li>"
+      : selected.conflicts
+          .map((conflict) => `<li>${conflict.message}</li>`)
+          .join("");
+
+  const transcriptQuery = state.walkthroughTranscriptQuery.trim();
+  const transcriptResult = transcriptQuery ? searchWalkthrough(selected, transcriptQuery) : null;
+  matchesEl.innerHTML = transcriptResult
+    ? transcriptResult.transcriptMatches
+        .map((item) => `<article class="match-item"><small>${formatTimestamp(item.startMs)}</small><p>${item.text}</p></article>`)
+        .join("") || "<p>No transcript matches.</p>"
+    : "";
+
+  const projectQuery = state.walkthroughProjectQuery.trim();
+  if (!project || !projectQuery) {
+    projectSearchEl.innerHTML = "";
+  } else {
+    const result = walkthroughSearchAcrossProject(project, projectQuery);
+    projectSearchEl.innerHTML = `<div class="match-list">
+      <article class="match-item"><strong>Transcript Matches</strong><p>${result.transcriptMatches.length}</p></article>
+      <article class="match-item"><strong>Fact Matches</strong><p>${result.factMatches.length}</p></article>
+      <article class="match-item"><strong>Related Tasks</strong><p>${result.relatedTasks.join(" | ") || "None"}</p></article>
+      <article class="match-item"><strong>Related Risks</strong><p>${result.relatedRisks.join(" | ") || "None"}</p></article>
+    </div>`;
+  }
+
+  timelineEl.innerHTML = selected.transcript.segments
+    .map(
+      (segment) =>
+        `<article class="match-item"><small>${formatTimestamp(segment.startMs)}</small><p>${segment.text}</p></article>`
+    )
+    .join("") || "<p>No timeline available.</p>";
+
+  const facts = project ? projectFacts(project) : [];
+  propertyFactsEl.innerHTML = facts
+    .slice(0, 18)
+    .map(
+      (fact) =>
+        `<article class="match-item"><strong>${fact.category}</strong><p>${fact.correctedValue ?? fact.value}</p><small>${fact.status} | ${Math.round(fact.confidence * 100)}%</small></article>`
+    )
+    .join("") || "<p>No property facts extracted yet.</p>";
+
+  const sellerFacts = selected.facts.filter((fact) => /seller|timing|price|possession|motivation/i.test(fact.category));
+  sellerSummaryEl.innerHTML = sellerFacts
+    .slice(0, 8)
+    .map((fact) => `<li>${fact.correctedValue ?? fact.value}</li>`)
+    .join("") || "<li>No seller discussion summary yet.</li>";
+
+  const followUps = selected.tasks.openQuestions.length > 0 ? selected.tasks.openQuestions : ["Confirm unresolved pricing, timing, and inclusion details."];
+  followUpEl.innerHTML = followUps.map((item) => `<li>${item}</li>`).join("");
+
+  updateWalkthroughIndicators();
 }
 
 function saveOverrideAndActivity(path: string, patch: PhotoOverride, message: string): void {
@@ -575,7 +1108,7 @@ function renderPhotoWorkspace(): void {
         .join(" | ");
       return `<button type="button" class="photo-tile ${state.selectedPhotoPath === photo.filePath ? "active-project" : ""}" data-photo-select="${photo.filePath}">
         <img src="${photo.thumbnailUrl}" alt="${photo.fileName}" />
-        <strong>${photo.fileName}</strong>
+        <strong>${prettyFileName(photo.fileName)}</strong>
         <small>#${photo.recommendedMlsOrder} | score ${photo.heroScore}</small>
         <small>${badges || "no tags"}</small>
       </button>`;
@@ -590,9 +1123,10 @@ function renderPhotoWorkspace(): void {
   const selectedMeta = photoOverride(selected.filePath);
   detail.innerHTML = `<div class="photo-detail-card">
     <img src="${selected.thumbnailUrl}" alt="${selected.fileName}" />
-    <h3>${selected.fileName}</h3>
+    <h3>${prettyFileName(selected.fileName)}</h3>
     <p>Current ranking: #${selected.recommendedMlsOrder}</p>
     <p>Scene: ${prettySceneTag(selected.sceneTag)} | Decision: ${selected.decision}</p>
+    <button type="button" class="secondary preview-photo" data-preview-photo="${selected.filePath}">Open larger preview</button>
     <div class="toggle-grid">
       <label><input type="checkbox" data-photo-flag="rankLocked" ${selectedMeta.rankLocked ? "checked" : ""} data-path="${selected.filePath}" /> Lock ranking</label>
       <label><input type="checkbox" data-photo-flag="favorite" ${selectedMeta.favorite ? "checked" : ""} data-path="${selected.filePath}" /> Favorite</label>
@@ -607,7 +1141,7 @@ function renderPhotoWorkspace(): void {
       const meta = photoOverride(photo.filePath);
       const lock = meta.rankLocked ? "locked" : "";
       const draggable = meta.rankLocked ? "false" : "true";
-      return `<li class="rank-item ${lock}" draggable="${draggable}" data-rank-path="${photo.filePath}">#${photo.recommendedMlsOrder} ${photo.fileName}</li>`;
+      return `<li class="rank-item ${lock}" draggable="${draggable}" data-rank-path="${photo.filePath}">#${photo.recommendedMlsOrder} ${prettyFileName(photo.fileName)}</li>`;
     })
     .join("");
 }
@@ -818,7 +1352,7 @@ function renderTopFive(photos: PhotoAssessment[]): void {
 
   top.forEach((photo) => {
     const li = document.createElement("li");
-    li.textContent = `${photo.fileName} (${photo.heroScore}/100, ${prettySceneTag(photo.sceneTag)}): ${photo.recommendationReasons.join(" ")}`;
+    li.textContent = `${prettyFileName(photo.fileName)} (${photo.heroScore}/100, ${prettySceneTag(photo.sceneTag)}): ${photo.recommendationReasons.join(" ")}`;
     list.appendChild(li);
   });
 }
@@ -891,16 +1425,21 @@ function renderPhotoTable(photos: PhotoAssessment[]): void {
         )
         .join("");
 
+      const alternateScenes = (photo.vision.scene.alternatives ?? [])
+        .map((item) => `${prettySceneTag(item.label)} ${formatConfidence(item.confidence)}`)
+        .join(" | ");
+
       const analysisSummary = `${prettySceneTag(photo.vision.scene.label)} (${formatConfidence(photo.vision.scene.confidence)}) | ${detectedProblems.length} problems flagged`;
 
       return `<div class="photo-row" data-photo-path="${photo.filePath}">
         <img class="thumb" src="${photo.thumbnailUrl}" alt="${photo.fileName}" />
         <div>
-          <strong>${photo.fileName}</strong>
+          <strong>${prettyFileName(photo.fileName)}</strong>
           <small>${photo.width}x${photo.height} | scene: ${prettySceneTag(photo.sceneTag)} | dup: ${duplicate} | sim: ${similar}</small>
           <small>Scores: sharpness ${photo.scores.sharpness}, exposure ${photo.scores.exposure}, brightness ${photo.scores.brightness}, contrast ${photo.scores.contrast}, resolution ${photo.scores.resolution}, orientation ${photo.scores.orientation}, aspect ${photo.scores.usableAspect}</small>
           <small>Issues: ${issues}</small>
           <small>Recommendation: ${photo.recommendationReasons.join(" ")}</small>
+          <small><button type="button" class="secondary preview-photo" data-preview-photo="${photo.filePath}">Open larger preview</button></small>
           <details class="analysis-card">
             <summary>Vision analysis: ${analysisSummary}</summary>
             <div class="analysis-grid">
@@ -909,6 +1448,7 @@ function renderPhotoTable(photos: PhotoAssessment[]): void {
                 <ul>
                   <li><span>Detected scene</span><strong>${prettySceneTag(photo.vision.scene.label)}</strong></li>
                   <li><span>Confidence</span><strong>${formatConfidence(photo.vision.scene.confidence)}</strong></li>
+                  <li><span>Alternatives</span><strong>${alternateScenes || "None"}</strong></li>
                 </ul>
               </section>
               <section>
@@ -985,15 +1525,61 @@ function updateDashboardFromState(): void {
   renderActivityFeed();
   renderPhotoWorkspace();
   renderAssetPanels();
+  renderTourWorkspace();
+  renderWalkthroughWorkspace();
+}
+
+function findPhotoByHint(hint: string): PhotoAssessment | null {
+  const normalized = hint.toLowerCase();
+  const photos = effectivePhotos();
+
+  const sceneMatch = photos.find((photo) => normalized.includes(photo.sceneTag.replace(/-/g, " ")));
+  if (sceneMatch) {
+    return sceneMatch;
+  }
+
+  const nameMatch = photos.find((photo) => normalized.includes(photo.fileName.toLowerCase()));
+  if (nameMatch) {
+    return nameMatch;
+  }
+
+  if (normalized.includes("hero")) {
+    return [...photos].sort((a, b) => b.heroScore - a.heroScore)[0] ?? null;
+  }
+
+  return null;
 }
 
 function renderExecutiveSummary(review: DirectorReview): void {
   const exec = review.executiveSummary;
+  const strengthsEl = document.getElementById("execStrengths");
+  const weaknessesEl = document.getElementById("execWeaknesses");
+  const missingEl = document.getElementById("execMissingShots");
+
   setText("execHero", exec.heroImageRecommendation);
   setText("execReadiness", exec.estimatedMlsReadiness);
-  updateList("execStrengths", exec.strengths, "No strengths identified yet.");
-  updateList("execWeaknesses", exec.weaknesses, "No weaknesses identified yet.");
-  updateList("execMissingShots", exec.missingShots, "No missing shots identified.");
+
+  const renderLinkedList = (element: HTMLElement | null, values: string[], emptyLabel: string): void => {
+    if (!element) {
+      return;
+    }
+    element.innerHTML = "";
+    const items = values.length > 0 ? values : [emptyLabel];
+    for (const item of items) {
+      const li = document.createElement("li");
+      const target = findPhotoByHint(item);
+      if (target) {
+        li.innerHTML = `${item} <button type="button" class="secondary summary-link" data-summary-photo="${target.filePath}">Open asset</button>`;
+      } else {
+        li.textContent = item;
+      }
+      element.appendChild(li);
+    }
+  };
+
+  renderLinkedList(strengthsEl, exec.strengths, "No strengths identified yet.");
+  renderLinkedList(weaknessesEl, exec.weaknesses, "No weaknesses identified yet.");
+  renderLinkedList(missingEl, exec.missingShots, "No missing shots identified.");
 }
 
 function renderDirectorConversation(summary: IntakeSummary, review: DirectorReview): void {
@@ -1004,22 +1590,49 @@ function renderDirectorConversation(summary: IntakeSummary, review: DirectorRevi
 
   const top = [...summary.photos].sort((a, b) => b.heroScore - a.heroScore)[0];
   const laundryMissing = review.missingShotChecklist.some((item) => item.toLowerCase().includes("laundry"));
-  const lines: string[] = [];
+  const recommendations: Array<{ title: string; message: string; photo: PhotoAssessment | null }> = [];
 
   if (top) {
-    lines.push(`I recommend leading with ${top.fileName}; it is currently your strongest hero candidate.`);
+    recommendations.push({
+      title: "Lead Hero",
+      message: `Lead with ${prettyFileName(top.fileName)} because it has the highest hero score (${top.heroScore}/100) and strongest launch impact.`,
+      photo: top
+    });
   }
-  lines.push(`The kitchen sequence is ${summary.photos.some((item) => item.sceneTag === "kitchen") ? "excellent" : "still missing"}.`);
-  if (laundryMissing) {
-    lines.push("You are still missing a laundry room photo.");
-  }
-  lines.push(`This listing is ${review.launchReadinessScore}% launch ready.`);
 
-  panel.innerHTML = lines
-    .map(
-      (line, index) =>
-        `<div class="director-line"><p>${line}</p><button type="button" class="secondary accept-recommendation" data-rec-index="${index}" data-message="${line.replace(/"/g, "&quot;")}">Accept Recommendation</button></div>`
-    )
+  const kitchen = summary.photos.find((item) => item.sceneTag === "kitchen") ?? null;
+  recommendations.push({
+    title: "Kitchen Sequence",
+    message: kitchen
+      ? `Kitchen coverage is present. Keep ${prettyFileName(kitchen.fileName)} early in sequence to strengthen buyer confidence.`
+      : "Kitchen sequence is still missing. Capture one wide and one detail shot for buyer decision support.",
+    photo: kitchen
+  });
+
+  if (laundryMissing) {
+    recommendations.push({
+      title: "Coverage Gap",
+      message: "Laundry coverage is missing. Add one clear laundry photo to reduce buyer uncertainty.",
+      photo: null
+    });
+  }
+
+  recommendations.push({
+    title: "Launch Readiness",
+    message: `Current listing readiness is ${review.launchReadinessScore}% (${review.launchReadinessLabel}). Prioritize needs-work items before publish.`,
+    photo: top ?? null
+  });
+
+  panel.innerHTML = recommendations
+    .map((item, index) => {
+      const preview = item.photo
+        ? `<img src="${item.photo.thumbnailUrl}" alt="${item.photo.fileName}" data-preview-photo="${item.photo.filePath}" class="director-preview" />`
+        : "";
+      const openPhoto = item.photo
+        ? `<button type="button" class="secondary summary-link" data-summary-photo="${item.photo.filePath}">Open asset</button>`
+        : "";
+      return `<div class="director-line"><strong>${item.title}</strong>${preview}<p>${item.message}</p><div class="button-row">${openPhoto}<button type="button" class="secondary accept-recommendation" data-rec-index="${index}" data-message="${item.message.replace(/"/g, "&quot;")}">Accept Recommendation</button></div></div>`;
+    })
     .join("");
 }
 
@@ -1094,14 +1707,9 @@ function openProject(projectId: string): void {
 
   state.currentProjectId = project.id;
   state.overrides = project.overrides as Record<string, PhotoOverride>;
+  state.selectedWalkthroughId = project.walkthroughs[0]?.id ?? null;
 
   const summary = projectSummaryFromStored(project);
-  if (!summary) {
-    renderProjectDashboard();
-    renderProjectStatus();
-    return;
-  }
-
   const addressInput = document.getElementById("address") as HTMLInputElement | null;
   const priceInput = document.getElementById("price") as HTMLInputElement | null;
   if (addressInput) {
@@ -1111,10 +1719,28 @@ function openProject(projectId: string): void {
     priceInput.value = project.listPrice;
   }
 
+  if (!summary) {
+    const results = document.getElementById("results");
+    if (results) {
+      results.classList.remove("hidden");
+    }
+    renderProjectDashboard();
+    renderProjectStatus();
+    renderTourWorkspace();
+    renderWalkthroughWorkspace();
+    updateWalkthroughIndicators();
+    return;
+  }
+
   renderResults(summary);
 }
 
 async function processIntake(files: File[], address: string, listPrice: string, replacePath?: string): Promise<void> {
+  if (!address.trim()) {
+    setText("inboxSummary", "Property address is required before import.");
+    return;
+  }
+
   const progressCard = document.getElementById("progressCard");
   if (progressCard) {
     progressCard.classList.remove("hidden");
@@ -1148,7 +1774,7 @@ async function processIntake(files: File[], address: string, listPrice: string, 
       `Analyzing new media ${index + 1} of ${synced.newFiles.length}: ${file.name}`
     );
 
-    if (isImageDescriptor({ name: file.name, type: file.type })) {
+    if (isImageDescriptor({ name: file.name, type: file.type }) && !isFloorPlanPath(file.webkitRelativePath || file.name)) {
       try {
         const forcedPath = synced.filePathByName.get(file.name);
         const metrics = await analyzePhoto(file, forcedPath);
@@ -1195,16 +1821,16 @@ async function processIntake(files: File[], address: string, listPrice: string, 
 }
 
 function assignFiles(files: File[]): void {
-  state.files = files;
+  state.files = [...files].sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name));
   const dropzone = document.getElementById("dropzone");
   const project = currentProject();
   const alreadyAnalyzedPaths = new Set((project ? activeMedia(project) : []).map((item) => item.filePath));
-  state.inboxItems = buildInbox(files, alreadyAnalyzedPaths);
+  state.inboxItems = buildInbox(state.files, alreadyAnalyzedPaths);
 
   if (dropzone) {
     const helperText = dropzone.querySelector("span");
     if (helperText) {
-      helperText.textContent = `${files.length} files selected`;
+      helperText.textContent = `${state.files.length} files selected`;
     }
   }
 
@@ -1215,6 +1841,200 @@ function applyOverride(path: string, patch: PhotoOverride): void {
   saveOverrideAndActivity(path, patch, `Override updated for ${path}`);
 
   updateDashboardFromState();
+}
+
+function stopRecordingStream(): void {
+  state.recordingStream?.getTracks().forEach((track) => track.stop());
+  state.recordingStream = null;
+}
+
+async function beginWalkthroughRecording(): Promise<void> {
+  if (!isMediaRecorderSupported()) {
+    setRecordingStatusMessage("Recording is not supported in this browser. Upload audio instead.");
+    setRecordingStatus("error");
+    return;
+  }
+
+  const consent = document.getElementById("walkthroughConsent") as HTMLInputElement | null;
+  if (!consent?.checked) {
+    setRecordingStatusMessage("Confirm recording consent before starting.");
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const recorder = new MediaRecorder(stream);
+    state.recordingStream = stream;
+    state.recorder = recorder;
+    state.recordingChunks = [];
+    state.pendingAudioBlob = null;
+    state.pendingAudioMimeType = recorder.mimeType || "audio/webm";
+    state.recordingElapsedMs = 0;
+    setText("walkthroughElapsed", "00:00");
+
+    recorder.addEventListener("dataavailable", (event) => {
+      if (event.data.size > 0) {
+        state.recordingChunks.push(event.data);
+      }
+    });
+
+    recorder.addEventListener("stop", () => {
+      const blob = new Blob(state.recordingChunks, { type: state.pendingAudioMimeType ?? "audio/webm" });
+      state.pendingAudioBlob = blob;
+      setRecordingStatus(transitionRecorderState(state.recordingStatus, "stop"));
+      setRecordingStatusMessage("Recording stopped. Save walkthrough when ready.");
+      stopRecordingTicker();
+      stopRecordingStream();
+    });
+
+    recorder.start(1000);
+    setRecordingStatus(transitionRecorderState(state.recordingStatus, "start"));
+    setRecordingStatusMessage("Recording in progress.");
+    startRecordingTicker();
+  } catch {
+    setRecordingStatus(transitionRecorderState(state.recordingStatus, "fail"));
+    setRecordingStatusMessage("Microphone permission was denied or unavailable.");
+  }
+}
+
+function pauseWalkthroughRecording(): void {
+  if (!state.recorder || state.recorder.state !== "recording") {
+    return;
+  }
+  state.recorder.pause();
+  stopRecordingTicker();
+  setRecordingStatus(transitionRecorderState(state.recordingStatus, "pause"));
+  setRecordingStatusMessage("Recording paused.");
+}
+
+function resumeWalkthroughRecording(): void {
+  if (!state.recorder || state.recorder.state !== "paused") {
+    return;
+  }
+  state.recorder.resume();
+  setRecordingStatus(transitionRecorderState(state.recordingStatus, "resume"));
+  startRecordingTicker();
+  setRecordingStatusMessage("Recording resumed.");
+}
+
+function stopWalkthroughRecording(): void {
+  if (!state.recorder) {
+    return;
+  }
+  if (state.recorder.state === "recording" || state.recorder.state === "paused") {
+    state.recorder.stop();
+  }
+}
+
+async function savePendingRecordingAsWalkthrough(): Promise<void> {
+  const project = ensureCurrentProject();
+  if (!project || !state.pendingAudioBlob) {
+    return;
+  }
+
+  setRecordingStatus(transitionRecorderState(state.recordingStatus, "save"));
+  const provider = getTranscriptionProvider(state.transcriptionMode);
+  const transcription = await provider.transcribe({
+    audioBlob: state.pendingAudioBlob,
+    fileName: `recorded-${new Date().toISOString()}.webm`
+  });
+
+  const dataUrl = await blobToDataUrl(state.pendingAudioBlob);
+  const walkthrough = createWalkthroughRecord({
+    title: `Walkthrough ${new Date().toLocaleString()}`,
+    sourceType: "recording",
+    providerId: transcription.providerId,
+    transcriptText: transcription.text,
+    transcriptSegments: transcription.segments,
+    audio: {
+      mimeType: state.pendingAudioMimeType ?? "audio/webm",
+      dataUrl,
+      durationMs: state.recordingElapsedMs,
+      sourceLabel: "Browser recording"
+    }
+  });
+
+  saveWalkthroughToProject(walkthrough, `Saved recording walkthrough with ${walkthrough.facts.length} extracted facts`);
+  setRecordingStatus("idle");
+  state.pendingAudioBlob = null;
+  state.recordingChunks = [];
+  state.recordingElapsedMs = 0;
+  setText("walkthroughElapsed", "00:00");
+  setRecordingStatusMessage("Walkthrough saved.");
+  renderWalkthroughWorkspace();
+}
+
+async function importWalkthroughFiles(files: File[]): Promise<void> {
+  const project = ensureCurrentProject();
+  if (!project || files.length === 0) {
+    return;
+  }
+
+  for (const file of files) {
+    const isAudio = file.type.startsWith("audio/") || /\.(m4a|mp3|wav|webm|ogg|aac)$/i.test(file.name);
+
+    if (isAudio) {
+      const provider = getTranscriptionProvider(state.transcriptionMode);
+      const transcription = await provider.transcribe({
+        audioBlob: file,
+        fileName: file.name
+      });
+      const dataUrl = await blobToDataUrl(file);
+      const walkthrough = createWalkthroughRecord({
+        title: `Imported audio: ${file.name}`,
+        sourceType: "upload",
+        providerId: transcription.providerId,
+        transcriptText: transcription.text,
+        transcriptSegments: transcription.segments,
+        audio: {
+          mimeType: file.type || "audio/mpeg",
+          dataUrl,
+          durationMs: 0,
+          sourceLabel: file.name
+        }
+      });
+      saveWalkthroughToProject(walkthrough, `Imported walkthrough audio ${file.name}`);
+      continue;
+    }
+
+    const content = await file.text();
+    const parsed = parseTranscriptImport(file.name, file.type, content);
+    const walkthrough = createWalkthroughRecord({
+      title: `Imported transcript: ${file.name}`,
+      sourceType: "upload",
+      providerId: parsed.providerId,
+      transcriptText: parsed.text,
+      transcriptSegments: parsed.segments,
+      audio: null
+    });
+    saveWalkthroughToProject(
+      walkthrough,
+      `Imported transcript ${file.name} (${parsed.format}) with ${walkthrough.facts.length} extracted facts`
+    );
+  }
+
+  setRecordingStatusMessage(`Imported ${files.length} walkthrough file(s).`);
+  renderWalkthroughWorkspace();
+}
+
+function persistWalkthroughSelection(mutator: (walkthrough: WalkthroughRecord) => WalkthroughRecord, message: string): void {
+  const project = currentProject();
+  const selected = currentWalkthrough();
+  if (!project || !selected) {
+    return;
+  }
+  const updatedWalkthrough = mutator(selected);
+  saveWalkthroughToProject(updatedWalkthrough, message);
+  renderWalkthroughWorkspace();
+}
+
+function addBeforeUnloadGuard(): void {
+  window.addEventListener("beforeunload", (event) => {
+    if (state.recordingStatus === "recording" || state.recordingStatus === "paused") {
+      event.preventDefault();
+      event.returnValue = "A walkthrough recording is in progress.";
+    }
+  });
 }
 
 function initializeIntakeApp(): void {
@@ -1238,6 +2058,33 @@ function initializeIntakeApp(): void {
   const photoDetail = document.getElementById("photoDetail");
   const rankList = document.getElementById("rankList");
   const directorConversation = document.getElementById("directorConversation");
+  const resultsRoot = document.getElementById("results");
+  const walkthroughStart = document.getElementById("walkthroughStartBtn") as HTMLButtonElement | null;
+  const walkthroughPause = document.getElementById("walkthroughPauseBtn") as HTMLButtonElement | null;
+  const walkthroughResume = document.getElementById("walkthroughResumeBtn") as HTMLButtonElement | null;
+  const walkthroughStop = document.getElementById("walkthroughStopBtn") as HTMLButtonElement | null;
+  const walkthroughSave = document.getElementById("walkthroughSaveBtn") as HTMLButtonElement | null;
+  const walkthroughImport = document.getElementById("walkthroughImportInput") as HTMLInputElement | null;
+  const walkthroughMode = document.getElementById("walkthroughTranscriptionMode") as HTMLSelectElement | null;
+  const walkthroughTranscriptSearch = document.getElementById("walkthroughTranscriptSearch") as HTMLInputElement | null;
+  const walkthroughProjectSearch = document.getElementById("walkthroughProjectSearch") as HTMLInputElement | null;
+  const walkthroughHistory = document.getElementById("walkthroughHistory");
+  const walkthroughSaveTranscriptEdit = document.getElementById("walkthroughSaveTranscriptEdit") as HTMLButtonElement | null;
+  const walkthroughEditedTranscript = document.getElementById("walkthroughEditedTranscript") as HTMLTextAreaElement | null;
+  const walkthroughFacts = document.getElementById("walkthroughFacts");
+  const walkthroughManualCategory = document.getElementById("walkthroughManualFactCategory") as HTMLInputElement | null;
+  const walkthroughManualValue = document.getElementById("walkthroughManualFactValue") as HTMLInputElement | null;
+  const walkthroughManualQuote = document.getElementById("walkthroughManualFactQuote") as HTMLTextAreaElement | null;
+  const walkthroughManualStatus = document.getElementById("walkthroughManualFactStatus") as HTMLSelectElement | null;
+  const walkthroughAddManualFact = document.getElementById("walkthroughAddManualFact") as HTMLButtonElement | null;
+  const walkthroughSaveNotes = document.getElementById("walkthroughSaveNotes") as HTMLButtonElement | null;
+  const walkthroughListingNotes = document.getElementById("walkthroughListingNotes") as HTMLTextAreaElement | null;
+  const matterportUrl = document.getElementById("matterportUrl") as HTMLInputElement | null;
+  const zillow3dUrl = document.getElementById("zillow3dUrl") as HTMLInputElement | null;
+  const virtualTourUrl = document.getElementById("virtualTourUrl") as HTMLInputElement | null;
+  const saveTourLinks = document.getElementById("saveTourLinks") as HTMLButtonElement | null;
+  const closePreview = document.getElementById("closePhotoPreview") as HTMLButtonElement | null;
+  const previewModal = document.getElementById("photoPreviewModal");
 
   if (
     !folderInput ||
@@ -1259,10 +2106,38 @@ function initializeIntakeApp(): void {
     !photoGrid ||
     !photoDetail ||
     !rankList ||
-    !directorConversation
+    !directorConversation ||
+    !walkthroughStart ||
+    !walkthroughPause ||
+    !walkthroughResume ||
+    !walkthroughStop ||
+    !walkthroughSave ||
+    !walkthroughImport ||
+    !walkthroughMode ||
+    !walkthroughTranscriptSearch ||
+    !walkthroughProjectSearch ||
+    !walkthroughHistory ||
+    !walkthroughSaveTranscriptEdit ||
+    !walkthroughEditedTranscript ||
+    !walkthroughFacts ||
+    !walkthroughManualCategory ||
+    !walkthroughManualValue ||
+    !walkthroughManualQuote ||
+    !walkthroughManualStatus ||
+    !walkthroughAddManualFact ||
+    !walkthroughSaveNotes ||
+    !walkthroughListingNotes ||
+    !matterportUrl ||
+    !zillow3dUrl ||
+    !virtualTourUrl ||
+    !saveTourLinks ||
+    !closePreview ||
+    !previewModal
   ) {
     return;
   }
+
+  addBeforeUnloadGuard();
 
   folderInput.addEventListener("change", () => {
     assignFiles(Array.from(folderInput.files ?? []));
@@ -1284,16 +2159,22 @@ function initializeIntakeApp(): void {
   dropzone.addEventListener("drop", (event) => {
     event.preventDefault();
     dropzone.classList.remove("dragging");
-    const droppedFiles = Array.from(event.dataTransfer?.files ?? []);
-    if (droppedFiles.length > 0) {
-      assignFiles(droppedFiles);
-    }
+    void (async () => {
+      const droppedFiles = await collectDroppedFiles(event.dataTransfer);
+      if (droppedFiles.length > 0) {
+        assignFiles(droppedFiles);
+      }
+    })();
   });
 
   analyzeBtn.addEventListener("click", () => {
     void (async () => {
       analyzeBtn.disabled = true;
       try {
+        if (!addressInput.value.trim()) {
+          setText("inboxSummary", "Property address is required before import.");
+          return;
+        }
         const accepted = acceptedFiles(state.inboxItems, state.files);
         if (accepted.length === 0) {
           return;
@@ -1353,7 +2234,8 @@ function initializeIntakeApp(): void {
     }
 
     if (target.classList.contains("scene-override") && target instanceof HTMLSelectElement) {
-      applyOverride(path, { sceneTag: target.value as SceneTag });
+      const current = effectivePhotos().find((photo) => photo.filePath === path);
+      applyOverride(path, { sceneTag: target.value as SceneTag, rank: current?.recommendedMlsOrder });
       return;
     }
 
@@ -1373,6 +2255,15 @@ function initializeIntakeApp(): void {
   table.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const previewPath = target.getAttribute("data-preview-photo");
+    if (previewPath) {
+      const photo = photoByPath(previewPath);
+      if (photo) {
+        openImagePreview(photo);
+      }
       return;
     }
 
@@ -1430,15 +2321,184 @@ function initializeIntakeApp(): void {
   batchAccept.addEventListener("click", () => applyBatchInboxDecision("accept"));
   batchReject.addEventListener("click", () => applyBatchInboxDecision("reject"));
 
+  walkthroughMode.addEventListener("change", () => {
+    state.transcriptionMode = walkthroughMode.value;
+    setRecordingStatusMessage(`Transcription mode set to ${walkthroughMode.value}.`);
+  });
+
+  walkthroughStart.addEventListener("click", () => {
+    void beginWalkthroughRecording();
+  });
+  walkthroughPause.addEventListener("click", () => pauseWalkthroughRecording());
+  walkthroughResume.addEventListener("click", () => resumeWalkthroughRecording());
+  walkthroughStop.addEventListener("click", () => stopWalkthroughRecording());
+  walkthroughSave.addEventListener("click", () => {
+    void savePendingRecordingAsWalkthrough();
+  });
+
+  walkthroughImport.addEventListener("change", () => {
+    const files = Array.from(walkthroughImport.files ?? []);
+    void importWalkthroughFiles(files);
+    walkthroughImport.value = "";
+  });
+
+  walkthroughHistory.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const selectedId = target.getAttribute("data-walkthrough-select");
+    if (!selectedId) {
+      return;
+    }
+    state.selectedWalkthroughId = selectedId;
+    renderWalkthroughWorkspace();
+  });
+
+  walkthroughTranscriptSearch.addEventListener("input", () => {
+    state.walkthroughTranscriptQuery = walkthroughTranscriptSearch.value;
+    renderWalkthroughWorkspace();
+  });
+
+  walkthroughProjectSearch.addEventListener("input", () => {
+    state.walkthroughProjectQuery = walkthroughProjectSearch.value;
+    renderWalkthroughWorkspace();
+  });
+
+  walkthroughSaveTranscriptEdit.addEventListener("click", () => {
+    const editedText = walkthroughEditedTranscript.value;
+    persistWalkthroughSelection(
+      (walkthrough) => updateWalkthroughTranscript(walkthrough, editedText, "Director"),
+      "Transcript text edited and saved"
+    );
+  });
+
+  walkthroughFacts.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const factId = target.getAttribute("data-fact-id");
+    const action = target.getAttribute("data-fact-action") as FactDecision | null;
+    if (!factId || !action) {
+      return;
+    }
+
+    let correctedValue: string | undefined;
+    if (action === "corrected") {
+      const input = walkthroughFacts.querySelector<HTMLInputElement>(`input[data-corrected-value="${factId}"]`);
+      correctedValue = input?.value ?? "";
+    }
+
+    persistWalkthroughSelection(
+      (walkthrough) => applyFactDecisionToWalkthrough(walkthrough, factId, action, correctedValue),
+      `Fact review decision applied: ${action}`
+    );
+  });
+
+  walkthroughAddManualFact.addEventListener("click", () => {
+    const category = walkthroughManualCategory.value.trim();
+    const value = walkthroughManualValue.value.trim();
+    const quote = walkthroughManualQuote.value.trim();
+    const status = walkthroughManualStatus.value as FactStatus;
+    if (!category || !value || !quote) {
+      setRecordingStatusMessage("Manual fact requires category, value, and quote.");
+      return;
+    }
+
+    persistWalkthroughSelection(
+      (walkthrough) =>
+        addManualFact(walkthrough, {
+          category,
+          value,
+          quote,
+          status
+        }),
+      `Manual fact added: ${category}`
+    );
+
+    walkthroughManualCategory.value = "";
+    walkthroughManualValue.value = "";
+    walkthroughManualQuote.value = "";
+  });
+
+  walkthroughSaveNotes.addEventListener("click", () => {
+    const project = currentProject();
+    if (!project) {
+      return;
+    }
+    const updated = {
+      ...project,
+      listingNotes: walkthroughListingNotes.value
+    };
+    saveProject(updated);
+    setRecordingStatusMessage("Listing notes saved.");
+  });
+
+  saveTourLinks.addEventListener("click", () => {
+    const project = ensureCurrentProject();
+    if (!project) {
+      setText("tourLinkStatus", "Property address is required before saving tour links.");
+      return;
+    }
+
+    const matterport = matterportUrl.value.trim();
+    const zillow = zillow3dUrl.value.trim();
+    const virtualTour = virtualTourUrl.value.trim();
+    const checks = [validateTourUrl(matterport), validateTourUrl(zillow), validateTourUrl(virtualTour)];
+    const invalid = checks.find((item) => !item.valid);
+    if (invalid) {
+      setText("tourLinkStatus", invalid.reason);
+      return;
+    }
+
+    const updated = {
+      ...project,
+      tourLinks: {
+        matterportUrl: matterport,
+        zillow3dUrl: zillow,
+        virtualTourUrl: virtualTour,
+        updatedAt: new Date().toISOString()
+      }
+    };
+    saveProject(pushProjectActivity(updated, {
+      type: "status",
+      message: "Tour links updated"
+    }));
+    renderTourWorkspace();
+    renderProjectDashboard();
+  });
+
+  closePreview.addEventListener("click", () => closeImagePreview());
+  previewModal.addEventListener("click", (event) => {
+    if (event.target === previewModal) {
+      closeImagePreview();
+    }
+  });
+
   workspaceNav.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
       return;
     }
-    const view = target.getAttribute("data-workspace-view");
+    const button = target.closest<HTMLElement>("[data-workspace-view]");
+    const view = button?.getAttribute("data-workspace-view");
     if (!view || !isWorkspaceView(view)) {
       return;
     }
+
+    if (view === "walkthrough") {
+      const project = ensureCurrentProject();
+      if (project) {
+        const results = document.getElementById("results");
+        if (results) {
+          results.classList.remove("hidden");
+        }
+        state.selectedWalkthroughId = project.walkthroughs[0]?.id ?? null;
+        renderWalkthroughWorkspace();
+      }
+    }
+
     setWorkspaceView(view);
   });
 
@@ -1472,6 +2532,21 @@ function initializeIntakeApp(): void {
     const value = target.checked;
     saveOverrideAndActivity(path, { [flag]: value }, `Updated ${flag} for ${path}`);
     updateDashboardFromState();
+  });
+
+  photoDetail.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const previewPath = target.getAttribute("data-preview-photo");
+    if (!previewPath) {
+      return;
+    }
+    const photo = photoByPath(previewPath);
+    if (photo) {
+      openImagePreview(photo);
+    }
   });
 
   let dragPath: string | null = null;
@@ -1530,7 +2605,26 @@ function initializeIntakeApp(): void {
 
   directorConversation.addEventListener("click", (event) => {
     const target = event.target;
-    if (!(target instanceof HTMLElement) || !target.classList.contains("accept-recommendation")) {
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const previewPath = target.getAttribute("data-preview-photo");
+    if (previewPath) {
+      const photo = photoByPath(previewPath);
+      if (photo) {
+        openImagePreview(photo);
+      }
+      return;
+    }
+
+    const summaryPath = target.getAttribute("data-summary-photo");
+    if (summaryPath) {
+      focusPhoto(summaryPath);
+      return;
+    }
+
+    if (!target.classList.contains("accept-recommendation")) {
       return;
     }
     const message = target.getAttribute("data-message") ?? "Recommendation accepted";
@@ -1545,6 +2639,17 @@ function initializeIntakeApp(): void {
     saveProject(updated);
     renderActivityFeed();
     renderProjectDashboard();
+  });
+
+  resultsRoot?.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const summaryPath = target.getAttribute("data-summary-photo");
+    if (summaryPath) {
+      focusPhoto(summaryPath);
+    }
   });
 
   projectList.addEventListener("click", (event) => {
@@ -1562,6 +2667,7 @@ function initializeIntakeApp(): void {
   renderProjectDashboard();
   renderProjectStatus();
   renderInbox();
+  renderTourWorkspace();
   setWorkspaceView(state.currentView);
   if (state.projects.length > 0) {
     openProject(state.projects[0]?.id ?? "");

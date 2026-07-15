@@ -23,7 +23,7 @@ describe("director inbox", () => {
 
     const contract = inbox.find((item) => item.fileName === "purchase-contract.pdf");
     expect(contract?.decision).toBe("ignore");
-    expect(contract?.locked).toBe(true);
+    expect(contract?.locked).toBe(false);
   });
 
   it("adds raw/edited recommendation when both exist", () => {

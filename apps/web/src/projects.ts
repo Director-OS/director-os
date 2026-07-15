@@ -1,4 +1,5 @@
 import type { DirectorReview, IntakeSummary, PhotoAssessment, PhotoMetrics } from "./intake-analysis.js";
+import type { ExtractedFact, WalkthroughRecord } from "./walkthrough.js";
 
 export interface ProjectStatus {
   mediaComplete: boolean;
@@ -46,7 +47,8 @@ export interface ProjectActivityEntry {
     | "replacement"
     | "delete"
     | "recommendation-accepted"
-    | "status";
+    | "status"
+    | "walkthrough";
   message: string;
 }
 
@@ -66,6 +68,14 @@ export interface DirectorProject {
   newSinceLastAnalysis: number;
   status: ProjectStatus;
   activity: ProjectActivityEntry[];
+  walkthroughs: WalkthroughRecord[];
+  tourLinks: {
+    matterportUrl: string;
+    zillow3dUrl: string;
+    virtualTourUrl: string;
+    updatedAt: string | null;
+  };
+  listingNotes: string;
 }
 
 const STORAGE_KEY = "director-os-projects-v1";
@@ -116,7 +126,15 @@ function normalizeProject(project: DirectorProject): DirectorProject {
       mlsReady: false,
       launchReady: false
     },
-    activity: Array.isArray(project.activity) ? project.activity : []
+    activity: Array.isArray(project.activity) ? project.activity : [],
+    walkthroughs: Array.isArray(project.walkthroughs) ? project.walkthroughs : [],
+    tourLinks: project.tourLinks ?? {
+      matterportUrl: "",
+      zillow3dUrl: "",
+      virtualTourUrl: "",
+      updatedAt: null
+    },
+    listingNotes: project.listingNotes ?? ""
   };
 }
 
@@ -175,6 +193,14 @@ export function getOrCreateProject(address: string, listPrice: string): Director
       mlsReady: false,
       launchReady: false
     },
+    tourLinks: {
+      matterportUrl: "",
+      zillow3dUrl: "",
+      virtualTourUrl: "",
+      updatedAt: null
+    },
+    listingNotes: "",
+    walkthroughs: [],
     activity: [
       {
         at: now,
@@ -510,5 +536,40 @@ export function projectSummaryFromStored(project: DirectorProject): IntakeSummar
     },
     photos,
     generatedAt: project.lastAnalyzedAt ?? nowIso()
+  };
+}
+
+export function upsertProjectWalkthrough(project: DirectorProject, walkthrough: WalkthroughRecord): DirectorProject {
+  const index = project.walkthroughs.findIndex((item) => item.id === walkthrough.id);
+  const walkthroughs = [...project.walkthroughs];
+  if (index >= 0) {
+    walkthroughs[index] = walkthrough;
+  } else {
+    walkthroughs.unshift(walkthrough);
+  }
+
+  return {
+    ...project,
+    walkthroughs,
+    activity: [
+      {
+        at: nowIso(),
+        type: "walkthrough",
+        message: `Saved walkthrough: ${walkthrough.title}`
+      },
+      ...project.activity
+    ]
+  };
+}
+
+export function projectFacts(project: DirectorProject): ExtractedFact[] {
+  return project.walkthroughs.flatMap((walkthrough) => walkthrough.facts);
+}
+
+export function walkthroughIndicators(project: DirectorProject): { newFacts: number; needsVerification: number } {
+  const facts = projectFacts(project);
+  return {
+    newFacts: facts.filter((fact) => fact.decision === "pending").length,
+    needsVerification: facts.filter((fact) => fact.status === "Needs Verification" || fact.status === "Uncertain").length
   };
 }

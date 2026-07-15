@@ -103,6 +103,21 @@ export interface IntakeSummary {
 const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "webp", "heic", "heif", "avif"]);
 const VIDEO_EXTENSIONS = new Set(["mp4", "mov", "m4v", "avi", "mkv", "webm"]);
 const DOCUMENT_EXTENSIONS = new Set(["doc", "docx", "txt", "rtf", "xlsx", "csv", "ppt", "pptx"]);
+const FLOOR_PLAN_KEYWORDS = ["floorplan", "floor-plan", "floor_plan", "fp", "plan"];
+
+function normalizedMediaName(file: FileDescriptor): string {
+  const raw = `${file.path ?? ""} ${file.name}`;
+  return raw.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+}
+
+function isFloorPlanDescriptor(file: FileDescriptor): boolean {
+  const normalized = normalizedMediaName(file);
+  if (!FLOOR_PLAN_KEYWORDS.some((keyword) => normalized.includes(keyword))) {
+    return false;
+  }
+  const extension = getExtension(file.name);
+  return extension === "pdf" || IMAGE_EXTENSIONS.has(extension);
+}
 
 function getExtension(fileName: string): string {
   const segments = fileName.toLowerCase().split(".");
@@ -129,6 +144,15 @@ export function classifyMedia(files: FileDescriptor[]): MediaCounts {
   for (const file of files) {
     const extension = getExtension(file.name);
     const type = file.type ?? "";
+
+    if (isFloorPlanDescriptor(file)) {
+      if (extension === "pdf" || type === "application/pdf") {
+        counts.pdfs += 1;
+      } else {
+        counts.documents += 1;
+      }
+      continue;
+    }
 
     if (type.startsWith("image/") || IMAGE_EXTENSIONS.has(extension)) {
       counts.photos += 1;
@@ -286,6 +310,31 @@ function bestRecommendation(analysis: VisionAnalysis): Recommendation {
   return ordered[0] ?? { action: "keep", confidence: 0.5, reason: "Default keep decision." };
 }
 
+function normalizedStem(path: string): string {
+  const fileName = path.split("/").pop() ?? path;
+  const base = fileName.replace(/\.[a-z0-9]+$/i, "");
+  return base
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-(raw|edited|edit|retouched|retouch|final|export|enhanced)\b/g, "")
+    .replace(/-\d+\b/g, "")
+    .replace(/--+/g, "-")
+    .replace(/(^-|-$)/g, "");
+}
+
+function likelyRawEditedPair(a: PhotoAssessment, b: PhotoAssessment): boolean {
+  const aExt = getExtension(a.fileName);
+  const bExt = getExtension(b.fileName);
+  const isRawA = ["cr2", "cr3", "nef", "arw", "dng", "raf", "orf", "rw2"].includes(aExt);
+  const isRawB = ["cr2", "cr3", "nef", "arw", "dng", "raf", "orf", "rw2"].includes(bExt);
+  if (isRawA === isRawB) {
+    return false;
+  }
+  const stemA = normalizedStem(a.filePath);
+  const stemB = normalizedStem(b.filePath);
+  return stemA.length > 0 && stemA === stemB;
+}
+
 function decisionFromRecommendation(recommendation: Recommendation): DecisionTag {
   if (recommendation.action === "remove") {
     return "remove";
@@ -335,8 +384,16 @@ function computeGroups(photos: PhotoAssessment[]): { duplicates: number[][]; sim
 
     const duplicateCluster = [i];
     for (let j = i + 1; j < photos.length; j += 1) {
-      const hashDistance = hammingDistance(photos[i]?.perceptualHash ?? "", photos[j]?.perceptualHash ?? "");
-      const histDistance = histogramDistance(photos[i]?.colorHistogram ?? [], photos[j]?.colorHistogram ?? []);
+      const left = photos[i];
+      const right = photos[j];
+      if (!left || !right) {
+        continue;
+      }
+      const hashDistance = hammingDistance(left.perceptualHash, right.perceptualHash);
+      const histDistance = histogramDistance(left.colorHistogram, right.colorHistogram);
+      if (likelyRawEditedPair(left, right)) {
+        continue;
+      }
       if (hashDistance <= 5 && histDistance < 0.08) {
         duplicateCluster.push(j);
         usedDuplicate.add(j);
@@ -506,10 +563,10 @@ function createMissingShotChecklist(summary: IntakeSummary): string[] {
 }
 
 function topHeroCandidates(photos: PhotoAssessment[]): PhotoAssessment[] {
-  return photos
-    .filter((item) => item.decision !== "remove")
-    .sort((a, b) => b.heroScore - a.heroScore)
-    .slice(0, 5);
+  const keepers = photos.filter((item) => item.decision !== "remove");
+  const preferred = keepers.filter((item) => item.sceneTag !== "exterior-side");
+  const source = preferred.length > 0 ? preferred : keepers;
+  return source.sort((a, b) => b.heroScore - a.heroScore).slice(0, 5);
 }
 
 function buildExecutiveSummary(summary: IntakeSummary): ExecutiveSummary {

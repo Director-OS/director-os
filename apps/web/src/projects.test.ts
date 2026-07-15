@@ -3,10 +3,34 @@ import { describe, expect, it } from "vitest";
 import type { PhotoAssessment } from "./intake-analysis.js";
 import {
   deleteProjectMedia,
+  loadProject,
   mergeAssessmentsWithHistory,
+  saveProject,
   syncUploadIntoProject,
+  upsertProjectWalkthrough,
   type DirectorProject
 } from "./projects.js";
+import { createWalkthroughRecord } from "./walkthrough.js";
+
+class MemoryStorage {
+  private store = new Map<string, string>();
+
+  getItem(key: string): string | null {
+    return this.store.has(key) ? this.store.get(key) ?? null : null;
+  }
+
+  setItem(key: string, value: string): void {
+    this.store.set(key, value);
+  }
+
+  removeItem(key: string): void {
+    this.store.delete(key);
+  }
+
+  clear(): void {
+    this.store.clear();
+  }
+}
 
 function baseProject(): DirectorProject {
   return {
@@ -24,6 +48,14 @@ function baseProject(): DirectorProject {
     latestSummary: null,
     latestReview: null,
     newSinceLastAnalysis: 0,
+    walkthroughs: [],
+    tourLinks: {
+      matterportUrl: "",
+      zillow3dUrl: "",
+      virtualTourUrl: "",
+      updatedAt: null
+    },
+    listingNotes: "",
     status: {
       mediaComplete: false,
       marketingComplete: false,
@@ -115,6 +147,28 @@ function makeAssessment(filePath: string, heroScore: number, rank: number): Phot
 }
 
 describe("projects store logic", () => {
+  it("persists walkthrough imports after reload", () => {
+    const memoryStorage = new MemoryStorage();
+    Object.defineProperty(globalThis, "localStorage", {
+      value: memoryStorage,
+      configurable: true
+    });
+
+    const walkthrough = createWalkthroughRecord({
+      title: "Listing walkthrough",
+      sourceType: "upload",
+      providerId: "uploaded-text",
+      transcriptText: "Seller said roof replaced in 2019 and HVAC in 2022."
+    });
+
+    const withWalkthrough = upsertProjectWalkthrough(baseProject(), walkthrough);
+    saveProject(withWalkthrough);
+    const reloaded = loadProject(withWalkthrough.id);
+
+    expect(reloaded?.walkthroughs.length).toBe(1);
+    expect(reloaded?.walkthroughs[0]?.transcript.originalText.includes("roof replaced in 2019")).toBe(true);
+  });
+
   it("detects already analyzed files and only marks new files as new", () => {
     const initial = baseProject();
     const file = new File(["abc"], "front.jpg", { type: "image/jpeg", lastModified: 1700000000000 });

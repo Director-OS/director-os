@@ -1,5 +1,6 @@
 export const SCENE_TAGS = [
   "exterior-front",
+  "exterior-side",
   "exterior-rear",
   "aerial",
   "kitchen",
@@ -7,6 +8,7 @@ export const SCENE_TAGS = [
   "living-room",
   "family-room",
   "primary-bedroom",
+  "primary-bathroom",
   "secondary-bedroom",
   "bathroom",
   "basement",
@@ -63,6 +65,7 @@ export interface VisionPhotoSignals {
 export interface SceneDetection {
   label: SceneTag;
   confidence: number;
+  alternatives?: Array<{ label: SceneTag; confidence: number }>;
 }
 
 export interface PhotoQualityAnalysis {
@@ -112,6 +115,7 @@ export interface VisionAnalysis {
 
 const SCENE_KEYWORDS: Array<{ keywords: string[]; tag: SceneTag; confidence: number }> = [
   { keywords: ["front", "curb", "street", "exterior-front"], tag: "exterior-front", confidence: 0.91 },
+  { keywords: ["side", "elevation", "side-yard", "sideyard"], tag: "exterior-side", confidence: 0.9 },
   { keywords: ["rear", "back", "yard", "exterior-rear"], tag: "exterior-rear", confidence: 0.89 },
   { keywords: ["drone", "aerial", "bird"], tag: "aerial", confidence: 0.94 },
   { keywords: ["kitchen"], tag: "kitchen", confidence: 0.94 },
@@ -119,6 +123,7 @@ const SCENE_KEYWORDS: Array<{ keywords: string[]; tag: SceneTag; confidence: num
   { keywords: ["living"], tag: "living-room", confidence: 0.9 },
   { keywords: ["family", "greatroom", "great-room"], tag: "family-room", confidence: 0.9 },
   { keywords: ["primary", "master", "owner"], tag: "primary-bedroom", confidence: 0.9 },
+  { keywords: ["primary-bath", "master-bath", "ensuite", "en-suite"], tag: "primary-bathroom", confidence: 0.91 },
   { keywords: ["bedroom", "bed", "guest"], tag: "secondary-bedroom", confidence: 0.86 },
   { keywords: ["bath", "toilet", "vanity"], tag: "bathroom", confidence: 0.9 },
   { keywords: ["basement", "lower-level"], tag: "basement", confidence: 0.89 },
@@ -148,42 +153,83 @@ function tokenizedName(fileName: string): string {
   return fileName.toLowerCase().replace(/[^a-z0-9]+/g, " ");
 }
 
+function candidate(tag: SceneTag, confidence: number): { label: SceneTag; confidence: number } {
+  return {
+    label: tag,
+    confidence: Math.max(0.01, Math.min(0.99, Number(confidence.toFixed(2))))
+  };
+}
+
+function rankSceneCandidates(candidates: Array<{ label: SceneTag; confidence: number }>): SceneDetection {
+  if (candidates.length === 0) {
+    return {
+      label: "miscellaneous",
+      confidence: 0.52,
+      alternatives: []
+    };
+  }
+
+  const byTag = new Map<SceneTag, number>();
+  for (const item of candidates) {
+    byTag.set(item.label, Math.max(item.confidence, byTag.get(item.label) ?? 0));
+  }
+
+  const ordered = [...byTag.entries()]
+    .map(([label, confidence]) => ({ label, confidence }))
+    .sort((a, b) => b.confidence - a.confidence);
+  const primary = ordered[0] ?? { label: "miscellaneous" as SceneTag, confidence: 0.52 };
+  const alternatives = ordered.filter((item) => item.label !== primary.label).slice(0, 3);
+
+  return {
+    label: primary.label,
+    confidence: primary.confidence,
+    alternatives
+  };
+}
+
 function detectScene(signals: VisionPhotoSignals): SceneDetection {
   const fileTokens = tokenizedName(signals.fileName);
+  const candidates: Array<{ label: SceneTag; confidence: number }> = [];
+
   for (const rule of SCENE_KEYWORDS) {
     if (rule.keywords.some((keyword) => fileTokens.includes(keyword))) {
-      return {
-        label: rule.tag,
-        confidence: rule.confidence
-      };
+      candidates.push(candidate(rule.tag, rule.confidence));
     }
   }
 
   const landscape = signals.width >= signals.height;
+  const isLikelyExterior = (signals.blueRatio > 0.2 || signals.greenRatio > 0.2) && landscape;
+
+  if (isLikelyExterior) {
+    candidates.push(candidate("exterior-front", 0.6));
+  }
 
   if (signals.greenRatio > 0.36 && landscape) {
-    return { label: "patio-deck", confidence: 0.73 };
+    candidates.push(candidate("patio-deck", 0.73));
   }
-  if ((signals.blueRatio > 0.24 || signals.greenRatio > 0.22) && signals.brightness > 0.48 && landscape) {
-    return { label: "exterior-front", confidence: 0.72 };
+  if (signals.blueRatio > 0.28 && signals.greenRatio > 0.2 && signals.brightness > 0.52 && landscape) {
+    candidates.push(candidate("exterior-front", 0.74));
+  }
+  if (signals.greenRatio > 0.3 && signals.brightness > 0.48 && signals.contrast < 0.12 && landscape) {
+    candidates.push(candidate("exterior-side", 0.69));
   }
   if (signals.warmRatio > 0.34 && signals.edgeDensity > 0.11 && signals.brightness > 0.42) {
-    return { label: "kitchen", confidence: 0.69 };
+    candidates.push(candidate("kitchen", 0.69));
   }
   if (signals.saturation < 0.2 && signals.brightness > 0.52 && signals.contrast > 0.08) {
-    return { label: "bathroom", confidence: 0.67 };
+    candidates.push(candidate("bathroom", 0.67));
+  }
+  if (signals.saturation < 0.17 && signals.brightness > 0.55 && signals.contrast > 0.1) {
+    candidates.push(candidate("primary-bathroom", 0.64));
   }
   if (signals.darkPixelRatio > 0.22 && signals.edgeDensity < 0.12 && signals.brightness < 0.5) {
-    return { label: "primary-bedroom", confidence: 0.65 };
+    candidates.push(candidate("primary-bedroom", 0.65));
   }
   if (signals.edgeDensity > 0.08) {
-    return { label: "living-room", confidence: 0.6 };
+    candidates.push(candidate("living-room", 0.6));
   }
 
-  return {
-    label: "miscellaneous",
-    confidence: 0.52
-  };
+  return rankSceneCandidates(candidates);
 }
 
 function quality(signals: VisionPhotoSignals): PhotoQualityAnalysis {
@@ -308,18 +354,25 @@ function detectProblems(signals: VisionPhotoSignals): ProblemDetection[] {
 }
 
 function recommendations(
+  signals: VisionPhotoSignals,
   scene: SceneDetection,
   q: PhotoQualityAnalysis,
   m: MarketingAnalysis,
   problems: ProblemDetection[]
 ): Recommendation[] {
+  const name = tokenizedName(signals.fileName);
+  const virtualStagingHint = hasKeyword(name, "virtual", "virtually", "staged", "render");
   const problemPenalty = problems.filter((item) => item.detected).length;
   const severeProblems = problems.filter((item) => item.detected && item.confidence >= 0.82).length;
+  const highQuality = q.sharpness >= 65 && q.exposure >= 64 && q.composition >= 64;
 
-  const removeConfidence = Math.min(0.99, 0.1 + severeProblems * 0.16 + (q.resolution < 35 || q.sharpness < 35 ? 0.38 : 0));
+  const baseRemove = 0.1 + severeProblems * 0.16 + (q.resolution < 35 || q.sharpness < 35 ? 0.38 : 0);
+  const stagingAdjustment = virtualStagingHint ? (highQuality ? -0.26 : -0.12) : 0;
+
+  const removeConfidence = Math.min(0.99, Math.max(0.05, baseRemove + stagingAdjustment));
   const retakeConfidence = Math.min(0.99, 0.2 + (q.sharpness < 55 ? 0.2 : 0) + (q.exposure < 55 ? 0.2 : 0) + problemPenalty * 0.05);
-  const editConfidence = Math.min(0.98, 0.28 + (q.whiteBalance < 70 ? 0.18 : 0) + (q.dynamicRange < 62 ? 0.16 : 0));
-  const keepConfidence = Math.min(0.99, 0.28 + m.heroImageScore / 180 + (problemPenalty === 0 ? 0.18 : 0));
+  const editConfidence = Math.min(0.98, 0.28 + (q.whiteBalance < 70 ? 0.18 : 0) + (q.dynamicRange < 62 ? 0.16 : 0) + (virtualStagingHint ? 0.08 : 0));
+  const keepConfidence = Math.min(0.99, 0.28 + m.heroImageScore / 180 + (problemPenalty === 0 ? 0.18 : 0) + (virtualStagingHint && highQuality ? 0.1 : 0));
   const moveEarlierConfidence = Math.min(0.97, 0.18 + m.heroImageScore / 170 + (scene.label === "exterior-front" || scene.label === "kitchen" ? 0.12 : 0));
   const moveLaterConfidence = Math.min(0.97, 0.18 + (q.composition < 62 ? 0.2 : 0) + (problemPenalty > 0 ? 0.16 : 0));
 
@@ -342,7 +395,9 @@ function recommendations(
     {
       action: "remove",
       confidence: Number(removeConfidence.toFixed(2)),
-      reason: "Detected issues increase risk of harming buyer perception and click-through."
+      reason: virtualStagingHint && highQuality
+        ? "Virtual staging appears intentional and high quality; prefer edit/review instead of hard removal."
+        : "Detected issues increase risk of harming buyer perception and click-through."
     },
     {
       action: "move-earlier",
@@ -362,7 +417,7 @@ export function runDirectorVisionEngineV1(signals: VisionPhotoSignals): VisionAn
   const qualityAnalysis = quality(signals);
   const marketingAnalysis = marketing(scene, qualityAnalysis);
   const problemAnalysis = detectProblems(signals);
-  const recommendationAnalysis = recommendations(scene, qualityAnalysis, marketingAnalysis, problemAnalysis);
+  const recommendationAnalysis = recommendations(signals, scene, qualityAnalysis, marketingAnalysis, problemAnalysis);
 
   return {
     engineVersion: "director-vision-engine-v1",

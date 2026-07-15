@@ -28,6 +28,18 @@ describe("intake analysis", () => {
     });
   });
 
+  it("separates floor plans from photo counts", () => {
+    const counts = classifyMedia([
+      { name: "kitchen.jpg", type: "image/jpeg", path: "photos/kitchen.jpg" },
+      { name: "main-floor-plan.jpg", type: "image/jpeg", path: "matterport/floorplans/main-floor-plan.jpg" },
+      { name: "second-floorplan.pdf", type: "application/pdf", path: "docs/second-floorplan.pdf" }
+    ]);
+
+    expect(counts.photos).toBe(1);
+    expect(counts.documents).toBe(1);
+    expect(counts.pdfs).toBe(1);
+  });
+
   it("detects probable duplicates and assigns remove decision", () => {
     const photos: PhotoMetrics[] = [
       {
