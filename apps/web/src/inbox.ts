@@ -79,6 +79,53 @@ function classifyKind(file: File): { kind: InboxKind; confidence: number; reason
   const ext = extension(file.name);
   const reasons: string[] = [];
 
+  const folderHints = {
+    raw: /\/raw\//,
+    edited: /\/edited\//,
+    photos: /\/photos\//,
+    drone: /\/drone\//,
+    matterport: /\/matterport\//,
+    floorPlan: /\/floor\s*-?plans?\//,
+    video: /\/video\//,
+    marketing: /\/marketing\//,
+    contracts: /\/contracts?\//
+  };
+
+  if (folderHints.raw.test(path) && (RAW_EXTENSIONS.has(ext) || EDITED_EXTENSIONS.has(ext))) {
+    reasons.push("RAW folder detected");
+    return { kind: "raw", confidence: 0.95, reasons };
+  }
+  if (folderHints.edited.test(path) || folderHints.photos.test(path)) {
+    if (EDITED_EXTENSIONS.has(ext) || file.type.startsWith("image/")) {
+      reasons.push("Edited/photos folder detected");
+      return { kind: "edited", confidence: 0.9, reasons };
+    }
+  }
+  if (folderHints.drone.test(path)) {
+    reasons.push("Drone folder detected");
+    return { kind: "drone", confidence: 0.92, reasons };
+  }
+  if (folderHints.matterport.test(path)) {
+    reasons.push("Matterport folder detected");
+    return { kind: "matterport", confidence: 0.93, reasons };
+  }
+  if (folderHints.floorPlan.test(path)) {
+    reasons.push("Floor Plans folder detected");
+    return { kind: "floor-plan", confidence: 0.93, reasons };
+  }
+  if (folderHints.video.test(path) && (VIDEO_EXTENSIONS.has(ext) || file.type.startsWith("video/"))) {
+    reasons.push("Video folder detected");
+    return { kind: "video", confidence: 0.92, reasons };
+  }
+  if (folderHints.marketing.test(path) && ext === "pdf") {
+    reasons.push("Marketing folder detected");
+    return { kind: "brochure", confidence: 0.88, reasons };
+  }
+  if (folderHints.contracts.test(path) && isDocumentLike(ext)) {
+    reasons.push("Contracts folder detected");
+    return { kind: "contract", confidence: 0.95, reasons };
+  }
+
   if (RAW_EXTENSIONS.has(ext)) {
     reasons.push(`RAW extension .${ext}`);
     return { kind: "raw", confidence: 0.96, reasons };

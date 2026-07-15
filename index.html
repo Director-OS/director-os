@@ -229,6 +229,28 @@
         <ul id="overviewMissing"></ul>
         <h3>Next Action</h3>
         <p id="overviewNextAction">-</p>
+        <h3>Readiness Deductions</h3>
+        <ul id="readinessDeductions"></ul>
+      </article>
+
+      <article class="card" data-workspace-panel="overview">
+        <h2>Weighted Readiness Breakdown</h2>
+        <div id="readinessBreakdown" class="match-list"></div>
+      </article>
+
+      <article class="card" data-workspace-panel="marketing">
+        <h2>Media Health</h2>
+        <div class="status-grid">
+          <article class="status-item"><span>Duplicates</span><strong id="healthDuplicateCount">0</strong></article>
+          <article class="status-item"><span>RAW Count</span><strong id="healthRawCount">0</strong></article>
+          <article class="status-item"><span>Edited Count</span><strong id="healthEditedCount">0</strong></article>
+          <article class="status-item"><span>Unedited Count</span><strong id="healthUneditedCount">0</strong></article>
+          <article class="status-item"><span>Missing Edits</span><strong id="healthMissingEdits">0</strong></article>
+          <article class="status-item"><span>Missing Hero</span><strong id="healthMissingHero">No</strong></article>
+          <article class="status-item"><span>Unused Assets</span><strong id="healthUnusedAssets">0</strong></article>
+          <article class="status-item"><span>Staged Assets</span><strong id="healthStagedAssets">0</strong></article>
+          <article class="status-item"><span>Twilight Candidates</span><strong id="healthTwilightCandidates">0</strong></article>
+        </div>
       </article>
 
       <article class="card" data-workspace-panel="walkthrough">
@@ -365,16 +387,19 @@
       <article class="card" data-workspace-panel="drone">
         <h2>Drone Workspace</h2>
         <p>Drone assets detected: <strong id="droneCount">0</strong></p>
+        <p class="workspace-hint">If this is a large or luxury listing, missing drone is treated as a readiness deduction.</p>
       </article>
 
       <article class="card" data-workspace-panel="video">
         <h2>Video Workspace</h2>
         <p>Video assets detected: <strong id="videoWorkspaceCount">0</strong></p>
+        <p class="workspace-hint">Director expects a teaser or walkthrough clip before launch.</p>
       </article>
 
       <article class="card" data-workspace-panel="floor-plans">
         <h2>Floor Plan Workspace</h2>
         <p>Floor plan assets detected: <strong id="floorPlanCount">0</strong></p>
+        <p class="workspace-hint">Floor plans are separated from photos and scored independently for readiness.</p>
       </article>
 
       <article class="card" data-workspace-panel="tour">
@@ -395,6 +420,7 @@
       <article class="card" data-workspace-panel="documents">
         <h2>Document Workspace</h2>
         <p>Documents detected: <strong id="documentWorkspaceCount">0</strong></p>
+        <p class="workspace-hint">Contracts are ignored by default during intake but can be manually included.</p>
       </article>
 
       <article class="card" data-workspace-panel="mls">
@@ -418,7 +444,14 @@
     <div class="preview-panel">
       <div class="section-head">
         <h2 id="photoPreviewTitle">Photo Preview</h2>
-        <button id="closePhotoPreview" type="button" class="secondary">Close</button>
+        <div class="button-row">
+          <button id="zoomOutPhotoPreview" type="button" class="secondary">-</button>
+          <span id="photoPreviewZoom">100%</span>
+          <button id="zoomInPhotoPreview" type="button" class="secondary">+</button>
+          <button id="prevPhotoPreview" type="button" class="secondary">Previous</button>
+          <button id="nextPhotoPreview" type="button" class="secondary">Next</button>
+          <button id="closePhotoPreview" type="button" class="secondary">Close</button>
+        </div>
       </div>
       <img id="photoPreviewImage" src="" alt="Photo preview" />
     </div>

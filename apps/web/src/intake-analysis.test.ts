@@ -157,6 +157,9 @@ describe("intake analysis", () => {
     const report = createTextReport(summary, review);
 
     expect(review.missingShotChecklist.length).toBeGreaterThan(0);
+    expect(["Ready", "Needs Attention", "Critical"]).toContain(review.listingReadinessLabel);
+    expect(review.readinessBreakdown.length).toBeGreaterThan(5);
+    expect(Array.isArray(review.readinessDeductions)).toBe(true);
     expect(report).toContain("Recommended MLS Order");
     expect(report).toContain("Executive Summary");
     expect(report).toContain("IMG_1001.JPG");

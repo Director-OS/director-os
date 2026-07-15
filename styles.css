@@ -673,6 +673,16 @@ ul {
   border-radius: 10px;
   border: 1px solid var(--line);
   background: #0a1220;
+  transform-origin: center;
+  transition: transform 0.2s ease;
+}
+
+#photoPreviewZoom {
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+  font-weight: 700;
+  padding: 0 4px;
 }
 
 .inbox-table {

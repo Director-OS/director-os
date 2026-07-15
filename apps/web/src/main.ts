@@ -130,6 +130,8 @@ interface AppState {
   recorder: MediaRecorder | null;
   recordingStream: MediaStream | null;
   transcriptionMode: string;
+  previewZoom: number;
+  recommendationDecisions: Record<string, "accept" | "reject" | "ignore">;
 }
 
 const state: AppState = {
@@ -159,8 +161,12 @@ const state: AppState = {
   recordingTimerId: null,
   recorder: null,
   recordingStream: null,
-  transcriptionMode: "mock-local"
+  transcriptionMode: "mock-local",
+  previewZoom: 1,
+  recommendationDecisions: {}
 };
+
+const photoMetricsCache = new Map<string, PhotoMetrics>();
 
 function toMetricClass(value: number): "good" | "warn" | "bad" {
   if (value >= 75) {
@@ -188,6 +194,37 @@ function prettyFileName(fileName: string): string {
     .replace(/\s+/g, " ")
     .trim();
   return cleaned.length > 0 ? cleaned.replace(/\b\w/g, (match) => match.toUpperCase()) : fileName;
+}
+
+function mediaPath(filePath: string, fileName: string): string {
+  return `${filePath} ${fileName}`.toLowerCase();
+}
+
+function buildReviewContext(project: DirectorProject, summary: IntakeSummary): Parameters<typeof buildDirectorReview>[1] {
+  const media = activeMedia(project);
+  const photos = summary.photos;
+  const rawCount = media.filter((item) => /\.(cr2|cr3|nef|arw|dng|raf|orf|rw2)$/i.test(item.fileName)).length;
+  const editedCount = media.filter((item) => /\.(jpg|jpeg|png|webp|heic|heif|avif|tif|tiff)$/i.test(item.fileName)).length;
+  const droneCount = media.filter((item) => mediaPath(item.filePath, item.fileName).includes("drone") || mediaPath(item.filePath, item.fileName).includes("aerial")).length;
+  const floorPlanCount = media.filter((item) => isFloorPlanPath(item.filePath)).length;
+  const matterportCount = media.filter((item) => mediaPath(item.filePath, item.fileName).includes("matterport") || mediaPath(item.filePath, item.fileName).includes("tour")).length;
+  const walkthroughCount = project.walkthroughs.length;
+  const sellerFactsCount = projectFacts(project).filter((fact) => /seller|price|timing|possession|priority|showing|closing|pet/i.test(fact.category)).length;
+  const readyForMls = Object.entries(state.overrides).filter(([, value]) => Boolean(value.readyForMls)).length;
+  const mlsCompletion = photos.length > 0 ? readyForMls / photos.length : 0;
+  const marketingCompletion = photos.length > 0 ? photos.filter((item) => item.decision === "recommended").length / photos.length : 0;
+
+  return {
+    rawCount,
+    editedCount,
+    droneCount,
+    floorPlanCount,
+    matterportCount: matterportCount + (project.tourLinks.matterportUrl ? 1 : 0),
+    walkthroughCount,
+    sellerFactsCount,
+    mlsCompletion,
+    marketingCompletion
+  };
 }
 
 function isFloorPlanPath(path: string): boolean {
@@ -410,6 +447,12 @@ function extractChannelMetrics(pixels: Uint8ClampedArray): {
 }
 
 async function analyzePhoto(file: File, forcedPath?: string): Promise<PhotoMetrics> {
+  const cacheKey = `${forcedPath ?? file.webkitRelativePath ?? file.name}::${file.size}::${file.lastModified}`;
+  const cached = photoMetricsCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const bitmap = await createImageBitmap(file);
   const originalWidth = bitmap.width;
   const originalHeight = bitmap.height;
@@ -432,7 +475,7 @@ async function analyzePhoto(file: File, forcedPath?: string): Promise<PhotoMetri
   const pixels = context.getImageData(0, 0, width, height).data;
   const channelMetrics = extractChannelMetrics(pixels);
 
-  return {
+  const result: PhotoMetrics = {
     fileName: file.name,
     filePath: forcedPath ?? file.webkitRelativePath ?? file.name,
     thumbnailUrl: URL.createObjectURL(file),
@@ -451,6 +494,9 @@ async function analyzePhoto(file: File, forcedPath?: string): Promise<PhotoMetri
     perceptualHash: channelMetrics.perceptualHash,
     colorHistogram: channelMetrics.colorHistogram
   };
+
+  photoMetricsCache.set(cacheKey, result);
+  return result;
 }
 
 function setProgress(percent: number, text: string): void {
@@ -487,13 +533,56 @@ function openImagePreview(photo: PhotoAssessment): void {
   const modal = document.getElementById("photoPreviewModal");
   const image = document.getElementById("photoPreviewImage") as HTMLImageElement | null;
   const title = document.getElementById("photoPreviewTitle");
+  const zoomValue = document.getElementById("photoPreviewZoom");
   if (!modal || !image || !title) {
     return;
   }
+  state.selectedPhotoPath = photo.filePath;
+  state.previewZoom = 1;
   image.src = photo.thumbnailUrl;
   image.alt = prettyFileName(photo.fileName);
+  image.style.transform = `scale(${state.previewZoom})`;
   title.textContent = `${prettyFileName(photo.fileName)} | ${photo.width}x${photo.height}`;
+  if (zoomValue) {
+    zoomValue.textContent = `${Math.round(state.previewZoom * 100)}%`;
+  }
   modal.classList.remove("hidden");
+}
+
+function updatePreviewFromSelected(): void {
+  const selected = state.selectedPhotoPath ? photoByPath(state.selectedPhotoPath) : null;
+  if (!selected) {
+    return;
+  }
+  const image = document.getElementById("photoPreviewImage") as HTMLImageElement | null;
+  const title = document.getElementById("photoPreviewTitle");
+  const zoomValue = document.getElementById("photoPreviewZoom");
+  if (!image || !title) {
+    return;
+  }
+  image.src = selected.thumbnailUrl;
+  image.alt = prettyFileName(selected.fileName);
+  image.style.transform = `scale(${state.previewZoom})`;
+  title.textContent = `${prettyFileName(selected.fileName)} | ${selected.width}x${selected.height}`;
+  if (zoomValue) {
+    zoomValue.textContent = `${Math.round(state.previewZoom * 100)}%`;
+  }
+}
+
+function stepPreview(direction: 1 | -1): void {
+  const photos = [...effectivePhotos()].sort((a, b) => a.recommendedMlsOrder - b.recommendedMlsOrder);
+  if (photos.length === 0) {
+    return;
+  }
+  const currentIndex = state.selectedPhotoPath ? photos.findIndex((item) => item.filePath === state.selectedPhotoPath) : -1;
+  const nextIndex = currentIndex >= 0 ? (currentIndex + direction + photos.length) % photos.length : 0;
+  state.selectedPhotoPath = photos[nextIndex]?.filePath ?? photos[0]?.filePath ?? null;
+  updatePreviewFromSelected();
+}
+
+function adjustPreviewZoom(delta: number): void {
+  state.previewZoom = Math.max(0.5, Math.min(3, state.previewZoom + delta));
+  updatePreviewFromSelected();
 }
 
 function closeImagePreview(): void {
@@ -504,6 +593,7 @@ function closeImagePreview(): void {
   }
   modal.classList.add("hidden");
   image.src = "";
+  state.previewZoom = 1;
 }
 
 function currentProject(): DirectorProject | null {
@@ -764,7 +854,7 @@ function projectLastActivity(project: DirectorProject | null): string {
 function renderOverviewWorkspace(): void {
   const project = currentProject();
   const summary = state.summary;
-  const review = summary ? buildDirectorReview(summary) : null;
+  const review = summary && project ? buildDirectorReview(summary, buildReviewContext(project, summary)) : null;
 
   setText("overviewAddress", project?.address ?? "-");
   setText("overviewPrice", project?.listPrice ?? "-");
@@ -1009,8 +1099,33 @@ function renderWalkthroughWorkspace(): void {
     .join("") || "<p>No timeline available.</p>";
 
   const facts = project ? projectFacts(project) : [];
-  propertyFactsEl.innerHTML = facts
-    .slice(0, 18)
+  const preferredCategories = [
+    "Roof",
+    "HVAC",
+    "Water Heater",
+    "Windows and Doors",
+    "Flooring",
+    "Kitchen Updates",
+    "Bath Updates",
+    "HOA",
+    "Utility Information",
+    "Seller Priorities",
+    "Pets",
+    "Showing Instructions",
+    "Closing Preferences"
+  ];
+  const prioritizedFacts = facts
+    .slice()
+    .sort((a, b) => {
+      const aIndex = preferredCategories.indexOf(a.category);
+      const bIndex = preferredCategories.indexOf(b.category);
+      const aRank = aIndex >= 0 ? aIndex : 999;
+      const bRank = bIndex >= 0 ? bIndex : 999;
+      return aRank - bRank;
+    });
+
+  propertyFactsEl.innerHTML = prioritizedFacts
+    .slice(0, 24)
     .map(
       (fact) =>
         `<article class="match-item"><strong>${fact.category}</strong><p>${fact.correctedValue ?? fact.value}</p><small>${fact.status} | ${Math.round(fact.confidence * 100)}%</small></article>`
@@ -1107,7 +1222,7 @@ function renderPhotoWorkspace(): void {
         .filter(Boolean)
         .join(" | ");
       return `<button type="button" class="photo-tile ${state.selectedPhotoPath === photo.filePath ? "active-project" : ""}" data-photo-select="${photo.filePath}">
-        <img src="${photo.thumbnailUrl}" alt="${photo.fileName}" />
+        <img loading="lazy" src="${photo.thumbnailUrl}" alt="${photo.fileName}" />
         <strong>${prettyFileName(photo.fileName)}</strong>
         <small>#${photo.recommendedMlsOrder} | score ${photo.heroScore}</small>
         <small>${badges || "no tags"}</small>
@@ -1122,7 +1237,7 @@ function renderPhotoWorkspace(): void {
 
   const selectedMeta = photoOverride(selected.filePath);
   detail.innerHTML = `<div class="photo-detail-card">
-    <img src="${selected.thumbnailUrl}" alt="${selected.fileName}" />
+    <img loading="lazy" src="${selected.thumbnailUrl}" alt="${selected.fileName}" />
     <h3>${prettyFileName(selected.fileName)}</h3>
     <p>Current ranking: #${selected.recommendedMlsOrder}</p>
     <p>Scene: ${prettySceneTag(selected.sceneTag)} | Decision: ${selected.decision}</p>
@@ -1432,7 +1547,7 @@ function renderPhotoTable(photos: PhotoAssessment[]): void {
       const analysisSummary = `${prettySceneTag(photo.vision.scene.label)} (${formatConfidence(photo.vision.scene.confidence)}) | ${detectedProblems.length} problems flagged`;
 
       return `<div class="photo-row" data-photo-path="${photo.filePath}">
-        <img class="thumb" src="${photo.thumbnailUrl}" alt="${photo.fileName}" />
+        <img class="thumb" loading="lazy" src="${photo.thumbnailUrl}" alt="${photo.fileName}" />
         <div>
           <strong>${prettyFileName(photo.fileName)}</strong>
           <small>${photo.width}x${photo.height} | scene: ${prettySceneTag(photo.sceneTag)} | dup: ${duplicate} | sim: ${similar}</small>
@@ -1582,6 +1697,30 @@ function renderExecutiveSummary(review: DirectorReview): void {
   renderLinkedList(missingEl, exec.missingShots, "No missing shots identified.");
 }
 
+function renderReadinessDetails(review: DirectorReview): void {
+  updateList("readinessDeductions", review.readinessDeductions, "No deductions. Listing is fully ready.");
+  const breakdown = document.getElementById("readinessBreakdown");
+  if (breakdown) {
+    breakdown.innerHTML = review.readinessBreakdown
+      .map(
+        (item) =>
+          `<article class="match-item"><strong>${item.label}</strong><p>${item.status} | weight ${Math.round(item.weight * 100)}%</p><p>${item.reason}</p></article>`
+      )
+      .join("");
+  }
+
+  const health = review.mediaHealth;
+  setText("healthDuplicateCount", `${health.duplicateCount}`);
+  setText("healthRawCount", `${health.rawCount}`);
+  setText("healthEditedCount", `${health.editedCount}`);
+  setText("healthUneditedCount", `${health.uneditedCount}`);
+  setText("healthMissingEdits", `${health.missingEdits}`);
+  setText("healthMissingHero", health.missingHero ? "Yes" : "No");
+  setText("healthUnusedAssets", `${health.unusedAssets}`);
+  setText("healthStagedAssets", `${health.stagedAssets}`);
+  setText("healthTwilightCandidates", `${health.twilightCandidates}`);
+}
+
 function renderDirectorConversation(summary: IntakeSummary, review: DirectorReview): void {
   const panel = document.getElementById("directorConversation");
   if (!panel) {
@@ -1623,21 +1762,30 @@ function renderDirectorConversation(summary: IntakeSummary, review: DirectorRevi
     photo: top ?? null
   });
 
+  const cardRecommendations = review.actionableRecommendations.map((item) => {
+    const affected = item.affectedPhotoPaths
+      .map((path) => `<button type="button" class="secondary summary-link" data-summary-photo="${path}">Open asset</button>`)
+      .join(" ");
+    const decision = state.recommendationDecisions[item.id] ?? "";
+    return `<div class="director-line"><strong>${item.title}</strong><p>${item.explanation}</p><small>Priority: ${item.priority}</small><div class="button-row"><button type="button" class="secondary recommendation-action ${decision === "accept" ? "active-pill" : ""}" data-recommendation-id="${item.id}" data-recommendation-action="accept">Accept</button><button type="button" class="secondary recommendation-action ${decision === "reject" ? "active-pill" : ""}" data-recommendation-id="${item.id}" data-recommendation-action="reject">Reject</button><button type="button" class="secondary recommendation-action ${decision === "ignore" ? "active-pill" : ""}" data-recommendation-id="${item.id}" data-recommendation-action="ignore">Ignore</button>${affected}</div></div>`;
+  });
+
   panel.innerHTML = recommendations
     .map((item, index) => {
       const preview = item.photo
-        ? `<img src="${item.photo.thumbnailUrl}" alt="${item.photo.fileName}" data-preview-photo="${item.photo.filePath}" class="director-preview" />`
+        ? `<img loading="lazy" src="${item.photo.thumbnailUrl}" alt="${item.photo.fileName}" data-preview-photo="${item.photo.filePath}" class="director-preview" />`
         : "";
       const openPhoto = item.photo
         ? `<button type="button" class="secondary summary-link" data-summary-photo="${item.photo.filePath}">Open asset</button>`
         : "";
       return `<div class="director-line"><strong>${item.title}</strong>${preview}<p>${item.message}</p><div class="button-row">${openPhoto}<button type="button" class="secondary accept-recommendation" data-rec-index="${index}" data-message="${item.message.replace(/"/g, "&quot;")}">Accept Recommendation</button></div></div>`;
     })
-    .join("");
+    .join("") + cardRecommendations.join("");
 }
 
 function renderResults(summary: IntakeSummary): void {
-  const review = buildDirectorReview(summary);
+  const projectForContext = currentProject();
+  const review = projectForContext ? buildDirectorReview(summary, buildReviewContext(projectForContext, summary)) : buildDirectorReview(summary);
   state.summary = summary;
   state.photoAssessments = summary.photos;
 
@@ -1656,7 +1804,7 @@ function renderResults(summary: IntakeSummary): void {
   }
 
   setText("launchScore", `${review.launchReadinessScore}`);
-  setText("launchLabel", review.launchReadinessLabel);
+  setText("launchLabel", review.listingReadinessLabel);
   setText("fileCount", `${summary.fileCount}`);
   setText("photoCount", `${summary.mediaCounts.photos}`);
   setText("videoCount", `${summary.mediaCounts.videos}`);
@@ -1667,6 +1815,7 @@ function renderResults(summary: IntakeSummary): void {
   setText("angle", review.buyerAngle);
   setText("runtime", summary.mediaCounts.videos > 0 ? "30-60 second highlight cut" : "Capture teaser before launch");
   renderExecutiveSummary(review);
+  renderReadinessDetails(review);
   renderDirectorConversation(summary, review);
 
   updateList("missingMedia", review.missingMedia, "No missing media detected.");
@@ -1678,6 +1827,15 @@ function renderResults(summary: IntakeSummary): void {
     downloadTextBtn.onclick = () => {
       const textReport = createTextReport(summary, review);
       triggerDownload("director-intake-report.txt", "text/plain", textReport);
+      const project = currentProject();
+      if (project) {
+        saveProject(
+          pushProjectActivity(project, {
+            type: "status",
+            message: "MLS exported (text report)"
+          })
+        );
+      }
     };
   }
 
@@ -1690,6 +1848,15 @@ function renderResults(summary: IntakeSummary): void {
         photos: effectivePhotos()
       };
       triggerDownload("director-intake-report.json", "application/json", JSON.stringify(payload, null, 2));
+      const project = currentProject();
+      if (project) {
+        saveProject(
+          pushProjectActivity(project, {
+            type: "status",
+            message: "MLS exported (JSON report)"
+          })
+        );
+      }
     };
   }
 
@@ -1783,6 +1950,12 @@ async function processIntake(files: File[], address: string, listPrice: string, 
         // Continue analysis even if one image cannot be decoded.
       }
     }
+
+    if ((index + 1) % 20 === 0) {
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => resolve());
+      });
+    }
   }
 
   // Existing analyzed media are retained; only newly added files are decoded again.
@@ -1810,9 +1983,30 @@ async function processIntake(files: File[], address: string, listPrice: string, 
     generatedAt: new Date().toISOString()
   };
 
-  const review = buildDirectorReview(summary);
-  workingProject = applyProjectStatus(workingProject, summary, review);
+  const reviewContext = buildReviewContext(workingProject, summary);
+  const contextualReview = buildDirectorReview(summary, reviewContext);
+  workingProject = applyProjectStatus(workingProject, summary, contextualReview);
   workingProject.overrides = { ...state.overrides };
+
+  const pathBlob = synced.newFiles.map((file) => (file.webkitRelativePath || file.name).toLowerCase()).join(" ");
+  if (pathBlob.includes("drone") || pathBlob.includes("aerial")) {
+    workingProject = pushProjectActivity(workingProject, {
+      type: "import",
+      message: "Drone assets added"
+    });
+  }
+  if (pathBlob.includes("matterport") || pathBlob.includes("3d") || pathBlob.includes("tour")) {
+    workingProject = pushProjectActivity(workingProject, {
+      type: "import",
+      message: "Matterport or 3D tour assets added"
+    });
+  }
+  if (contextualReview.listingReadinessLabel === "Ready") {
+    workingProject = pushProjectActivity(workingProject, {
+      type: "status",
+      message: "Launch ready"
+    });
+  }
   saveProject(workingProject);
 
   renderResults(summary);
@@ -2084,6 +2278,10 @@ function initializeIntakeApp(): void {
   const virtualTourUrl = document.getElementById("virtualTourUrl") as HTMLInputElement | null;
   const saveTourLinks = document.getElementById("saveTourLinks") as HTMLButtonElement | null;
   const closePreview = document.getElementById("closePhotoPreview") as HTMLButtonElement | null;
+  const prevPreview = document.getElementById("prevPhotoPreview") as HTMLButtonElement | null;
+  const nextPreview = document.getElementById("nextPhotoPreview") as HTMLButtonElement | null;
+  const zoomInPreview = document.getElementById("zoomInPhotoPreview") as HTMLButtonElement | null;
+  const zoomOutPreview = document.getElementById("zoomOutPhotoPreview") as HTMLButtonElement | null;
   const previewModal = document.getElementById("photoPreviewModal");
 
   if (
@@ -2132,6 +2330,10 @@ function initializeIntakeApp(): void {
     !virtualTourUrl ||
     !saveTourLinks ||
     !closePreview ||
+    !prevPreview ||
+    !nextPreview ||
+    !zoomInPreview ||
+    !zoomOutPreview ||
     !previewModal
   ) {
     return;
@@ -2470,6 +2672,10 @@ function initializeIntakeApp(): void {
   });
 
   closePreview.addEventListener("click", () => closeImagePreview());
+  prevPreview.addEventListener("click", () => stepPreview(-1));
+  nextPreview.addEventListener("click", () => stepPreview(1));
+  zoomInPreview.addEventListener("click", () => adjustPreviewZoom(0.2));
+  zoomOutPreview.addEventListener("click", () => adjustPreviewZoom(-0.2));
   previewModal.addEventListener("click", (event) => {
     if (event.target === previewModal) {
       closeImagePreview();
@@ -2621,6 +2827,23 @@ function initializeIntakeApp(): void {
     const summaryPath = target.getAttribute("data-summary-photo");
     if (summaryPath) {
       focusPhoto(summaryPath);
+      return;
+    }
+
+    const recommendationId = target.getAttribute("data-recommendation-id");
+    const recommendationAction = target.getAttribute("data-recommendation-action") as "accept" | "reject" | "ignore" | null;
+    if (recommendationId && recommendationAction) {
+      state.recommendationDecisions[recommendationId] = recommendationAction;
+      const project = currentProject();
+      if (project) {
+        saveProject(
+          pushProjectActivity(project, {
+            type: "recommendation-accepted",
+            message: `Recommendation ${recommendationId} marked ${recommendationAction}`
+          })
+        );
+      }
+      updateDashboardFromState();
       return;
     }
 

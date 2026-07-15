@@ -57,4 +57,15 @@ describe("director inbox", () => {
     expect(accepted.length).toBe(1);
     expect(accepted[0]?.name).toBe("a.jpg");
   });
+
+  it("uses folder names for smart classification", () => {
+    const droneFile = new File(["a"], "IMG_2001.jpg", { type: "image/jpeg", lastModified: 1 });
+    Object.defineProperty(droneFile, "webkitRelativePath", { value: "Listing/Drone/IMG_2001.jpg" });
+    const rawFile = new File(["b"], "IMG_2001.CR3", { type: "application/octet-stream", lastModified: 2 });
+    Object.defineProperty(rawFile, "webkitRelativePath", { value: "Listing/RAW/IMG_2001.CR3" });
+
+    const inbox = buildInbox([droneFile, rawFile], new Set());
+    expect(inbox.find((item) => item.fileName === "IMG_2001.jpg")?.kind).toBe("drone");
+    expect(inbox.find((item) => item.fileName === "IMG_2001.CR3")?.kind).toBe("raw");
+  });
 });

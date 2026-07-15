@@ -88,7 +88,59 @@ export interface DirectorReview {
   actionItems: string[];
   launchReadinessScore: number;
   launchReadinessLabel: "Not Ready" | "Needs Work" | "Almost Ready" | "Launch Ready";
+  listingReadinessLabel: "Ready" | "Needs Attention" | "Critical";
+  readinessBreakdown: Array<{
+    key:
+      | "photos"
+      | "hero-image"
+      | "raw-availability"
+      | "edited-availability"
+      | "drone"
+      | "video"
+      | "floor-plans"
+      | "matterport"
+      | "walkthrough"
+      | "seller-facts"
+      | "mls-completion"
+      | "marketing-completion";
+    label: string;
+    weight: number;
+    score: number;
+    status: "Ready" | "Needs Attention" | "Critical";
+    reason: string;
+  }>;
+  readinessDeductions: string[];
+  actionableRecommendations: Array<{
+    id: string;
+    title: string;
+    explanation: string;
+    affectedPhotoPaths: string[];
+    priority: "high" | "medium" | "low";
+  }>;
+  mediaHealth: {
+    duplicateCount: number;
+    rawCount: number;
+    editedCount: number;
+    uneditedCount: number;
+    missingEdits: number;
+    missingHero: boolean;
+    unusedAssets: number;
+    stagedAssets: number;
+    twilightCandidates: number;
+  };
   executiveSummary: ExecutiveSummary;
+}
+
+export interface ReviewContext {
+  rawCount?: number;
+  editedCount?: number;
+  droneCount?: number;
+  floorPlanCount?: number;
+  matterportCount?: number;
+  walkthroughCount?: number;
+  sellerFactsCount?: number;
+  mlsCompletion?: number;
+  marketingCompletion?: number;
 }
 
 export interface IntakeSummary {
@@ -532,6 +584,11 @@ function parsePrice(listPrice: string): number {
 function createMissingShotChecklist(summary: IntakeSummary): string[] {
   const checklist: string[] = [];
   const observed = new Set(summary.photos.map((candidate) => candidate.sceneTag));
+  const price = parsePrice(summary.listPrice);
+  const address = summary.address.toLowerCase();
+  const isLuxury = price >= 900000;
+  const isCondo = /condo|unit|apt|apartment|suite/.test(address);
+  const hasStrongExterior = observed.has("exterior-front") || observed.has("aerial");
 
   if (!observed.has("exterior-front")) {
     checklist.push("Capture a bright curb-appeal exterior front hero shot from street level.");
@@ -550,6 +607,27 @@ function createMissingShotChecklist(summary: IntakeSummary): string[] {
   }
   if (!observed.has("bathroom")) {
     checklist.push("Add a clean bathroom image that shows vanity and shower or tub context.");
+  }
+  if (!observed.has("primary-bathroom")) {
+    checklist.push("Add at least one primary bathroom shot with vanity and shower detail.");
+  }
+  if (!observed.has("laundry")) {
+    checklist.push("Include a laundry room shot to complete utility-area coverage.");
+  }
+  if (!observed.has("exterior-rear") && !observed.has("patio-deck") && !observed.has("pool") && !isCondo) {
+    checklist.push("No backyard coverage detected. Add one rear exterior lifestyle frame.");
+  }
+
+  if (isLuxury) {
+    checklist.push("Large luxury listing detected. Include at least 3 drone perspectives.");
+    checklist.push("Recommend twilight hero set for premium launch impact.");
+  } else if (isCondo) {
+    checklist.push("Condo profile detected: drone is optional and should focus on context if available.");
+    if (hasStrongExterior) {
+      checklist.push("Twilight is optional but recommended if exterior light balance is strong.");
+    }
+  } else if (hasStrongExterior) {
+    checklist.push("Exterior coverage is strong; consider adding one twilight exterior for marketing lift.");
   }
 
   if (summary.mediaCounts.videos < 1) {
@@ -615,9 +693,35 @@ function buildExecutiveSummary(summary: IntakeSummary): ExecutiveSummary {
   };
 }
 
-export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
+function findHero(photos: PhotoAssessment[]): PhotoAssessment | null {
+  return [...photos]
+    .filter((item) => item.decision !== "remove")
+    .sort((a, b) => b.heroScore - a.heroScore)[0] ?? null;
+}
+
+function classifyReadinessStatus(score: number): "Ready" | "Needs Attention" | "Critical" {
+  if (score >= 82) {
+    return "Ready";
+  }
+  if (score >= 58) {
+    return "Needs Attention";
+  }
+  return "Critical";
+}
+
+export function buildDirectorReview(summary: IntakeSummary, context: ReviewContext = {}): DirectorReview {
   const { mediaCounts, photos } = summary;
   const price = parsePrice(summary.listPrice);
+
+  const duplicateCount = photos.filter((item) => item.duplicateGroupId !== null).length;
+  const rawCount = context.rawCount ?? 0;
+  const editedCount = context.editedCount ?? mediaCounts.photos;
+  const uneditedCount = Math.max(0, rawCount - editedCount);
+  const missingEdits = Math.max(0, photos.filter((item) => item.decision === "needs-work").length - editedCount);
+  const stagedAssets = photos.filter((item) => item.fileName.toLowerCase().includes("stage") || item.fileName.toLowerCase().includes("virtual")).length;
+  const twilightCandidates = photos.filter((item) => item.sceneTag.startsWith("exterior") && item.heroScore >= 70).length;
+  const missingHero = findHero(photos) === null;
+  const unusedAssets = photos.filter((item) => item.decision === "remove").length;
 
   const missingMedia: string[] = [];
   if (mediaCounts.photos < 24) {
@@ -684,14 +788,173 @@ export function buildDirectorReview(summary: IntakeSummary): DirectorReview {
 
   actionItems.push("Follow recommended MLS sequencing for narrative flow from hero exterior to key interiors.");
 
+  const readinessBreakdown: DirectorReview["readinessBreakdown"] = [
+    {
+      key: "photos",
+      label: "Photos",
+      weight: 0.16,
+      score: normalize(mediaCounts.photos, 10, 38),
+      status: classifyReadinessStatus(normalize(mediaCounts.photos, 10, 38)),
+      reason: mediaCounts.photos >= 24 ? "Photo volume supports launch coverage." : `Only ${mediaCounts.photos} photos available; target is 24+.`
+    },
+    {
+      key: "hero-image",
+      label: "Hero Image",
+      weight: 0.12,
+      score: topHero?.heroScore ?? 0,
+      status: classifyReadinessStatus(topHero?.heroScore ?? 0),
+      reason: topHero ? `${topHero.fileName} currently leads hero ranking.` : "No viable hero image selected yet."
+    },
+    {
+      key: "raw-availability",
+      label: "RAW Availability",
+      weight: 0.07,
+      score: rawCount > 0 ? 95 : 25,
+      status: classifyReadinessStatus(rawCount > 0 ? 95 : 25),
+      reason: rawCount > 0 ? `${rawCount} RAW files available for fallback edits.` : "No RAW files detected."
+    },
+    {
+      key: "edited-availability",
+      label: "Edited Availability",
+      weight: 0.1,
+      score: editedCount > 0 ? normalize(editedCount, 8, 28) : 15,
+      status: classifyReadinessStatus(editedCount > 0 ? normalize(editedCount, 8, 28) : 15),
+      reason: editedCount > 0 ? `${editedCount} edited assets available for publish.` : "No edited files detected for publish set."
+    },
+    {
+      key: "drone",
+      label: "Drone",
+      weight: 0.06,
+      score: context.droneCount && context.droneCount > 0 ? 92 : price >= 900000 ? 30 : 70,
+      status: classifyReadinessStatus(context.droneCount && context.droneCount > 0 ? 92 : price >= 900000 ? 30 : 70),
+      reason:
+        context.droneCount && context.droneCount > 0
+          ? `${context.droneCount} drone assets detected.`
+          : price >= 900000
+            ? "Luxury listing without drone coverage is a critical gap."
+            : "Drone is optional for this listing profile."
+    },
+    {
+      key: "video",
+      label: "Video",
+      weight: 0.08,
+      score: mediaCounts.videos > 0 ? 90 : 35,
+      status: classifyReadinessStatus(mediaCounts.videos > 0 ? 90 : 35),
+      reason: mediaCounts.videos > 0 ? "Video walkthrough/teaser is present." : "Missing video teaser/walkthrough."
+    },
+    {
+      key: "floor-plans",
+      label: "Floor Plans",
+      weight: 0.06,
+      score: context.floorPlanCount && context.floorPlanCount > 0 ? 94 : 42,
+      status: classifyReadinessStatus(context.floorPlanCount && context.floorPlanCount > 0 ? 94 : 42),
+      reason: context.floorPlanCount && context.floorPlanCount > 0 ? "Floor plans are available." : "No floor plans detected."
+    },
+    {
+      key: "matterport",
+      label: "Matterport",
+      weight: 0.06,
+      score: context.matterportCount && context.matterportCount > 0 ? 92 : 55,
+      status: classifyReadinessStatus(context.matterportCount && context.matterportCount > 0 ? 92 : 55),
+      reason: context.matterportCount && context.matterportCount > 0 ? "3D tour coverage is available." : "Matterport/3D tour not provided yet."
+    },
+    {
+      key: "walkthrough",
+      label: "Walkthrough",
+      weight: 0.07,
+      score: context.walkthroughCount && context.walkthroughCount > 0 ? 90 : 40,
+      status: classifyReadinessStatus(context.walkthroughCount && context.walkthroughCount > 0 ? 90 : 40),
+      reason: context.walkthroughCount && context.walkthroughCount > 0 ? "Walkthrough transcript captured." : "Walkthrough not captured yet."
+    },
+    {
+      key: "seller-facts",
+      label: "Seller Facts",
+      weight: 0.08,
+      score: context.sellerFactsCount ? normalize(context.sellerFactsCount, 4, 20) : 30,
+      status: classifyReadinessStatus(context.sellerFactsCount ? normalize(context.sellerFactsCount, 4, 20) : 30),
+      reason:
+        context.sellerFactsCount && context.sellerFactsCount > 0
+          ? `${context.sellerFactsCount} seller facts extracted from walkthrough.`
+          : "No validated seller facts available yet."
+    },
+    {
+      key: "mls-completion",
+      label: "MLS Completion",
+      weight: 0.07,
+      score: Math.round(Math.max(0, Math.min(100, (context.mlsCompletion ?? 0) * 100))),
+      status: classifyReadinessStatus(Math.round(Math.max(0, Math.min(100, (context.mlsCompletion ?? 0) * 100)))),
+      reason: `MLS readiness coverage is ${Math.round((context.mlsCompletion ?? 0) * 100)}%.`
+    },
+    {
+      key: "marketing-completion",
+      label: "Marketing Completion",
+      weight: 0.07,
+      score: Math.round(Math.max(0, Math.min(100, (context.marketingCompletion ?? 0) * 100))),
+      status: classifyReadinessStatus(Math.round(Math.max(0, Math.min(100, (context.marketingCompletion ?? 0) * 100)))),
+      reason: `Marketing completion is ${Math.round((context.marketingCompletion ?? 0) * 100)}%.`
+    }
+  ];
+
+  const weightedReadiness = Math.round(
+    readinessBreakdown.reduce((total, item) => total + item.score * item.weight, 0)
+  );
+  const listingReadinessLabel = classifyReadinessStatus(weightedReadiness);
+  const readinessDeductions = readinessBreakdown
+    .filter((item) => item.score < 82)
+    .sort((a, b) => a.score - b.score)
+    .map((item) => `${item.label}: ${item.reason}`);
+
+  const actionableRecommendations: DirectorReview["actionableRecommendations"] = [
+    {
+      id: "hero-priority",
+      title: "Promote strongest hero image",
+      explanation: topHero
+        ? `${topHero.fileName} should be placed first because it has the highest hero score.`
+        : "No hero image is currently strong enough for lead placement.",
+      affectedPhotoPaths: topHero ? [topHero.filePath] : [],
+      priority: topHero ? "medium" : "high"
+    },
+    {
+      id: "remove-duplicates",
+      title: "Remove duplicate or weak assets",
+      explanation: unusedAssets > 0
+        ? `${unusedAssets} assets are currently marked remove and should be excluded from MLS export.`
+        : "No duplicate removals are pending.",
+      affectedPhotoPaths: photos.filter((item) => item.decision === "remove").slice(0, 8).map((item) => item.filePath),
+      priority: unusedAssets > 0 ? "high" : "low"
+    },
+    {
+      id: "complete-missing-shots",
+      title: "Close missing shot checklist",
+      explanation: `There are ${createMissingShotChecklist(summary).length} missing-shot recommendations to resolve before launch.`,
+      affectedPhotoPaths: [],
+      priority: createMissingShotChecklist(summary).length > 3 ? "high" : "medium"
+    }
+  ];
+
   return {
     storyAngle,
     buyerAngle,
     missingMedia,
     missingShotChecklist: createMissingShotChecklist(summary),
     actionItems,
-    launchReadinessScore,
+    launchReadinessScore: weightedReadiness,
     launchReadinessLabel,
+    listingReadinessLabel,
+    readinessBreakdown,
+    readinessDeductions,
+    actionableRecommendations,
+    mediaHealth: {
+      duplicateCount,
+      rawCount,
+      editedCount,
+      uneditedCount,
+      missingEdits,
+      missingHero,
+      unusedAssets,
+      stagedAssets,
+      twilightCandidates
+    },
     executiveSummary: buildExecutiveSummary(summary)
   };
 }
@@ -717,7 +980,9 @@ export function createTextReport(summary: IntakeSummary, review: DirectorReview)
     "",
     "Launch Readiness",
     "----------------",
-    `Score: ${review.launchReadinessScore}/100 (${review.launchReadinessLabel})`,
+    `Score: ${review.launchReadinessScore}/100 (${review.listingReadinessLabel})`,
+    "Deductions:",
+    ...(review.readinessDeductions.length > 0 ? review.readinessDeductions.map((item, index) => `${index + 1}. ${item}`) : ["None"]),
     "",
     "Executive Summary",
     "-----------------",
