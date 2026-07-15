@@ -1,11 +1,16 @@
-import { createReadStream } from "node:fs";
+import { createReadStream, readFileSync, watch } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
+import { exec } from "node:child_process";
 
 const host = "127.0.0.1";
 const requestedPort = Number(process.env.DIRECTOR_OS_WEB_PORT ?? 4173);
 const rootDir = process.cwd();
+const enableWatch = process.env.DIRECTOR_OS_WATCH === "1";
+const autoOpen = process.env.DIRECTOR_OS_OPEN === "1";
+
+const liveClients = new Set();
 
 const contentTypes = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -24,6 +29,20 @@ const contentTypes = new Map([
 function createStaticServer() {
   return createServer(async (req, res) => {
     try {
+      if (enableWatch && req.url?.startsWith("/__director_hmr")) {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive"
+        });
+        res.write(`data: connected\n\n`);
+        liveClients.add(res);
+        req.on("close", () => {
+          liveClients.delete(res);
+        });
+        return;
+      }
+
       const urlPath = req.url ? decodeURIComponent(req.url.split("?")[0]) : "/";
       const relativePath = urlPath === "/" ? "index.html" : urlPath.replace(/^\//, "");
       const safePath = normalize(relativePath).replace(/^\.\.(\/|\\|$)/, "");
@@ -38,6 +57,25 @@ function createStaticServer() {
 
       const extension = extname(filePath).toLowerCase();
       const contentType = contentTypes.get(extension) ?? "application/octet-stream";
+
+      if (enableWatch && extension === ".html") {
+        const html = readFileSync(filePath, "utf8");
+        const injected = html.replace(
+          "</body>",
+          `<script>
+const source = new EventSource('/__director_hmr');
+source.addEventListener('message', (event) => {
+  if (event.data === 'reload') {
+    location.reload();
+  }
+});
+</script></body>`
+        );
+        res.writeHead(200, { "Content-Type": contentType });
+        res.end(injected);
+        return;
+      }
+
       res.writeHead(200, { "Content-Type": contentType });
       createReadStream(filePath).pipe(res);
     } catch {
@@ -45,6 +83,36 @@ function createStaticServer() {
       res.end("Not found");
     }
   });
+}
+
+function notifyReload() {
+  for (const client of liveClients) {
+    client.write("data: reload\n\n");
+  }
+}
+
+function startWatchers() {
+  if (!enableWatch) {
+    return;
+  }
+  const files = ["index.html", "styles.css", "apps/web/dist/main.js"];
+  for (const relative of files) {
+    const target = join(rootDir, relative);
+    try {
+      watch(target, { persistent: true }, () => {
+        notifyReload();
+      });
+    } catch {
+      // ignore unavailable paths during startup; watcher is best effort
+    }
+  }
+}
+
+function openInBrowser(url) {
+  if (!autoOpen) {
+    return;
+  }
+  exec(`open '${url}'`);
 }
 
 function listenWithFallback(port) {
@@ -63,6 +131,8 @@ function listenWithFallback(port) {
 
   server.listen(port, host, () => {
     console.log(`Director Intake MVP available at http://${host}:${port}`);
+    startWatchers();
+    openInBrowser(`http://${host}:${port}`);
   });
 }
 

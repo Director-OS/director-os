@@ -56,13 +56,26 @@ npm test
 npm run build
 ```
 
-### Run Director Intake MVP
+### Run Director (Local Dev)
+
+```bash
+npm run dev
+```
+
+This command:
+
+- builds web assets in watch mode
+- starts the Director server on an available port
+- opens the browser automatically
+- reloads the page when local files change
+
+### Run Director Intake MVP (Static)
 
 ```bash
 npm run mvp
 ```
 
-Then open `http://127.0.0.1:4173` in your browser.
+Then open `http://127.0.0.1:4173` (or the next available port) in your browser.
 
 ### Bootstrap
 
