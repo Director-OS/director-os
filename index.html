@@ -39,7 +39,7 @@
         <label>Property address<input id="address" value="3004 Blackhawk Road, Dayton, OH 45420" /></label>
         <label>List price<input id="price" value="$200,000" /></label>
       </div>
-      <button id="analyzeBtn" disabled>Import accepted files</button>
+      <button id="analyzeBtn" disabled>Import Listing</button>
     </section>
 
     <section id="workspaceShell" class="card">
@@ -70,11 +70,13 @@
           <p id="inboxSummary">No files queued</p>
         </div>
         <div class="button-row">
+          <button id="toggleInboxDetailsBtn" type="button" class="secondary">Review Import Details</button>
           <button id="batchAcceptBtn" type="button" class="secondary">Batch Accept</button>
           <button id="batchRejectBtn" type="button" class="secondary">Batch Reject</button>
         </div>
       </div>
-      <div class="inbox-controls">
+      <div id="inboxDetails" class="hidden">
+        <div class="inbox-controls">
         <input id="inboxSearch" type="text" placeholder="Search by file name or path" />
         <select id="inboxKindFilter">
           <option value="all">All media types</option>
@@ -95,8 +97,9 @@
           <option value="reject">Reject</option>
           <option value="ignore">Ignore</option>
         </select>
+        </div>
+        <div id="inboxTable" class="inbox-table"></div>
       </div>
-      <div id="inboxTable" class="inbox-table"></div>
     </section>
 
     <section id="progressCard" class="card hidden">
@@ -400,6 +403,7 @@
         <h2>Floor Plan Workspace</h2>
         <p>Floor plan assets detected: <strong id="floorPlanCount">0</strong></p>
         <p class="workspace-hint">Floor plans are separated from photos and scored independently for readiness.</p>
+        <div id="floorPlanGallery" class="match-list"></div>
       </article>
 
       <article class="card" data-workspace-panel="tour">

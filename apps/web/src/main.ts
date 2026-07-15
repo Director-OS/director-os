@@ -132,6 +132,8 @@ interface AppState {
   transcriptionMode: string;
   previewZoom: number;
   recommendationDecisions: Record<string, "accept" | "reject" | "ignore">;
+  showInboxDetails: boolean;
+  sourceUrlsByPath: Record<string, string>;
 }
 
 const state: AppState = {
@@ -163,7 +165,9 @@ const state: AppState = {
   recordingStream: null,
   transcriptionMode: "mock-local",
   previewZoom: 1,
-  recommendationDecisions: {}
+  recommendationDecisions: {},
+  showInboxDetails: false,
+  sourceUrlsByPath: {}
 };
 
 const photoMetricsCache = new Map<string, PhotoMetrics>();
@@ -179,7 +183,26 @@ function toMetricClass(value: number): "good" | "warn" | "bad" {
 }
 
 function prettySceneTag(tag: SceneTag): string {
+  if (tag === "miscellaneous") {
+    return "Unknown / Needs Review";
+  }
   return tag.replace(/-/g, " ");
+}
+
+function sceneLabelFromDetection(sceneTag: SceneTag, confidence: number): string {
+  if (sceneTag === "miscellaneous" || confidence < 0.66) {
+    return "Unknown / Needs Review";
+  }
+  return prettySceneTag(sceneTag);
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function formatConfidence(value: number): string {
@@ -930,6 +953,53 @@ function renderAssetPanels(): void {
   setText("mlsReadyPhotos", `${readyForMls}`);
 }
 
+function isImagePath(path: string): boolean {
+  return /\.(jpg|jpeg|png|webp|gif|bmp|heic|heif|avif|tif|tiff)$/i.test(path);
+}
+
+function isPdfPath(path: string): boolean {
+  return /\.pdf$/i.test(path);
+}
+
+function renderFloorPlanWorkspace(): void {
+  const gallery = document.getElementById("floorPlanGallery");
+  if (!gallery) {
+    return;
+  }
+
+  const project = currentProject();
+  if (!project) {
+    gallery.innerHTML = "<p>Open or create a project to review floor plans.</p>";
+    return;
+  }
+
+  const floorPlans = activeMedia(project).filter((item) => isFloorPlanPath(item.filePath));
+  if (floorPlans.length === 0) {
+    gallery.innerHTML = "<p>No floor plans detected yet.</p>";
+    return;
+  }
+
+  gallery.innerHTML = floorPlans
+    .map((item) => {
+      const sourceUrl = state.sourceUrlsByPath[item.filePath];
+      const canImagePreview = Boolean(sourceUrl && isImagePath(item.fileName));
+      const canPdfOpen = Boolean(sourceUrl && isPdfPath(item.fileName));
+      const previewButton = canImagePreview
+        ? `<button type="button" class="secondary floor-plan-preview" data-path="${item.filePath}">Preview</button>`
+        : canPdfOpen
+          ? `<a class="secondary floor-plan-open" href="${sourceUrl}" target="_blank" rel="noopener noreferrer">Open PDF</a>`
+          : `<button type="button" class="secondary" disabled>No local preview</button>`;
+      const downloadButton = sourceUrl
+        ? `<a class="secondary floor-plan-open" href="${sourceUrl}" download="${item.fileName}">Download</a>`
+        : `<button type="button" class="secondary" disabled>Download unavailable</button>`;
+      const thumb = canImagePreview
+        ? `<img loading="lazy" src="${sourceUrl}" alt="${item.fileName}" class="thumb" />`
+        : `<div class="thumb floor-plan-thumb">${isPdfPath(item.fileName) ? "PDF" : "FILE"}</div>`;
+      return `<article class="floor-plan-item">${thumb}<div><strong>${prettyFileName(item.fileName)}</strong><small>Source: ${item.filePath}</small><div class="button-row">${previewButton}${downloadButton}</div></div></article>`;
+    })
+    .join("");
+}
+
 function renderTourWorkspace(): void {
   const project = currentProject();
   const matterportInput = document.getElementById("matterportUrl") as HTMLInputElement | null;
@@ -1184,6 +1254,14 @@ function setWorkspaceView(view: WorkspaceView): void {
   navButtons.forEach((button) => {
     button.classList.toggle("active-project", button.dataset.workspaceView === view);
   });
+
+  if (view === "floor-plans") {
+    renderFloorPlanWorkspace();
+  }
+  if (view === "tour") {
+    renderTourWorkspace();
+    renderAssetPanels();
+  }
 }
 
 function photoOverride(path: string): PhotoOverride {
@@ -1313,12 +1391,19 @@ function applyBatchInboxDecision(decision: InboxDecision): void {
   renderInbox();
 }
 
+function toggleInboxDetails(force?: boolean): void {
+  state.showInboxDetails = typeof force === "boolean" ? force : !state.showInboxDetails;
+  renderInbox();
+}
+
 function renderInbox(): void {
   const card = document.getElementById("inboxCard");
   const table = document.getElementById("inboxTable");
+  const details = document.getElementById("inboxDetails");
+  const toggle = document.getElementById("toggleInboxDetailsBtn") as HTMLButtonElement | null;
   const importBtn = document.getElementById("analyzeBtn") as HTMLButtonElement | null;
 
-  if (!card || !table || !importBtn) {
+  if (!card || !table || !details || !importBtn || !toggle) {
     return;
   }
 
@@ -1326,7 +1411,10 @@ function renderInbox(): void {
     card.classList.add("hidden");
     table.innerHTML = "";
     importBtn.disabled = true;
-    importBtn.textContent = "Import accepted files";
+    importBtn.textContent = "Import Listing";
+    toggle.textContent = "Review Import Details";
+    details.classList.add("hidden");
+    state.showInboxDetails = false;
     setText("inboxSummary", "No files queued");
     return;
   }
@@ -1341,8 +1429,11 @@ function renderInbox(): void {
 
   setText(
     "inboxSummary",
-    `Visible ${visible.length} | Accepted ${acceptedCount} | Rejected ${rejectedCount} | Ignored ${ignoredCount} | RAW ${counts.raw} | Edited ${counts.edited} | Drone ${counts.drone} | Video ${counts.video} | Floor plans ${counts["floor-plan"]} | Matterport ${counts.matterport} | Brochures ${counts.brochure} | Unknown ${counts.unknown}`
+    `Ready to import ${acceptedCount} of ${state.inboxItems.length} files | RAW ${counts.raw} | Edited ${counts.edited} | Drone ${counts.drone} | Video ${counts.video} | Floor plans ${counts["floor-plan"]} | Matterport ${counts.matterport} | Brochures ${counts.brochure} | Ignored ${ignoredCount} | Rejected ${rejectedCount}`
   );
+
+  toggle.textContent = state.showInboxDetails ? "Hide Import Details" : "Review Import Details";
+  details.classList.toggle("hidden", !state.showInboxDetails);
 
   const rows = visible
     .map((item) => {
@@ -1366,7 +1457,7 @@ function renderInbox(): void {
 
   table.innerHTML = rows;
   importBtn.disabled = acceptedCount === 0;
-  importBtn.textContent = `Import accepted files (${acceptedCount})`;
+  importBtn.textContent = `Import Listing (${acceptedCount})`;
 }
 
 function setInboxDecision(itemId: string, decision: InboxDecision): void {
@@ -1544,7 +1635,8 @@ function renderPhotoTable(photos: PhotoAssessment[]): void {
         .map((item) => `${prettySceneTag(item.label)} ${formatConfidence(item.confidence)}`)
         .join(" | ");
 
-      const analysisSummary = `${prettySceneTag(photo.vision.scene.label)} (${formatConfidence(photo.vision.scene.confidence)}) | ${detectedProblems.length} problems flagged`;
+      const primarySceneLabel = sceneLabelFromDetection(photo.vision.scene.label, photo.vision.scene.confidence);
+      const analysisSummary = `${primarySceneLabel} (${formatConfidence(photo.vision.scene.confidence)}) | ${detectedProblems.length} problems flagged`;
 
       return `<div class="photo-row" data-photo-path="${photo.filePath}">
         <img class="thumb" loading="lazy" src="${photo.thumbnailUrl}" alt="${photo.fileName}" />
@@ -1561,7 +1653,7 @@ function renderPhotoTable(photos: PhotoAssessment[]): void {
               <section>
                 <h4>Scene Detection</h4>
                 <ul>
-                  <li><span>Detected scene</span><strong>${prettySceneTag(photo.vision.scene.label)}</strong></li>
+                  <li><span>Detected scene</span><strong>${primarySceneLabel}</strong></li>
                   <li><span>Confidence</span><strong>${formatConfidence(photo.vision.scene.confidence)}</strong></li>
                   <li><span>Alternatives</span><strong>${alternateScenes || "None"}</strong></li>
                 </ul>
@@ -1640,6 +1732,7 @@ function updateDashboardFromState(): void {
   renderActivityFeed();
   renderPhotoWorkspace();
   renderAssetPanels();
+  renderFloorPlanWorkspace();
   renderTourWorkspace();
   renderWalkthroughWorkspace();
 }
@@ -1763,22 +1856,26 @@ function renderDirectorConversation(summary: IntakeSummary, review: DirectorRevi
   });
 
   const cardRecommendations = review.actionableRecommendations.map((item) => {
+    const safeTitle = escapeHtml(item.title || "Recommendation");
+    const safeExplanation = escapeHtml(item.explanation || "No details provided.");
     const affected = item.affectedPhotoPaths
       .map((path) => `<button type="button" class="secondary summary-link" data-summary-photo="${path}">Open asset</button>`)
       .join(" ");
     const decision = state.recommendationDecisions[item.id] ?? "";
-    return `<div class="director-line"><strong>${item.title}</strong><p>${item.explanation}</p><small>Priority: ${item.priority}</small><div class="button-row"><button type="button" class="secondary recommendation-action ${decision === "accept" ? "active-pill" : ""}" data-recommendation-id="${item.id}" data-recommendation-action="accept">Accept</button><button type="button" class="secondary recommendation-action ${decision === "reject" ? "active-pill" : ""}" data-recommendation-id="${item.id}" data-recommendation-action="reject">Reject</button><button type="button" class="secondary recommendation-action ${decision === "ignore" ? "active-pill" : ""}" data-recommendation-id="${item.id}" data-recommendation-action="ignore">Ignore</button>${affected}</div></div>`;
+    return `<div class="director-line"><strong>${safeTitle}</strong><p>${safeExplanation}</p><small>Priority: ${item.priority}</small><div class="button-row"><button type="button" class="secondary recommendation-action ${decision === "accept" ? "active-pill" : ""}" data-recommendation-id="${item.id}" data-recommendation-action="accept">Accept</button><button type="button" class="secondary recommendation-action ${decision === "reject" ? "active-pill" : ""}" data-recommendation-id="${item.id}" data-recommendation-action="reject">Reject</button><button type="button" class="secondary recommendation-action ${decision === "ignore" ? "active-pill" : ""}" data-recommendation-id="${item.id}" data-recommendation-action="ignore">Ignore</button>${affected}</div></div>`;
   });
 
   panel.innerHTML = recommendations
     .map((item, index) => {
+      const safeTitle = escapeHtml(item.title || "Recommendation");
+      const safeMessage = escapeHtml(item.message || "No recommendation details.");
       const preview = item.photo
         ? `<img loading="lazy" src="${item.photo.thumbnailUrl}" alt="${item.photo.fileName}" data-preview-photo="${item.photo.filePath}" class="director-preview" />`
         : "";
       const openPhoto = item.photo
         ? `<button type="button" class="secondary summary-link" data-summary-photo="${item.photo.filePath}">Open asset</button>`
         : "";
-      return `<div class="director-line"><strong>${item.title}</strong>${preview}<p>${item.message}</p><div class="button-row">${openPhoto}<button type="button" class="secondary accept-recommendation" data-rec-index="${index}" data-message="${item.message.replace(/"/g, "&quot;")}">Accept Recommendation</button></div></div>`;
+      return `<div class="director-line"><strong>${safeTitle}</strong>${preview}<p>${safeMessage}</p><div class="button-row">${openPhoto}<button type="button" class="secondary accept-recommendation" data-rec-index="${index}" data-message="${escapeHtml(item.message || "Recommendation accepted")}">Accept Recommendation</button></div></div>`;
     })
     .join("") + cardRecommendations.join("");
 }
@@ -1936,6 +2033,11 @@ async function processIntake(files: File[], address: string, listPrice: string, 
       continue;
     }
 
+    const syncedPath = synced.filePathByName.get(file.name) ?? (file.webkitRelativePath || file.name);
+    if (!state.sourceUrlsByPath[syncedPath]) {
+      state.sourceUrlsByPath[syncedPath] = URL.createObjectURL(file);
+    }
+
     setProgress(
       Math.round(((index + 1) / Math.max(synced.newFiles.length, 1)) * 100),
       `Analyzing new media ${index + 1} of ${synced.newFiles.length}: ${file.name}`
@@ -2016,6 +2118,12 @@ async function processIntake(files: File[], address: string, listPrice: string, 
 
 function assignFiles(files: File[]): void {
   state.files = [...files].sort((a, b) => (a.webkitRelativePath || a.name).localeCompare(b.webkitRelativePath || b.name));
+  for (const file of state.files) {
+    const path = file.webkitRelativePath || file.name;
+    if (!state.sourceUrlsByPath[path]) {
+      state.sourceUrlsByPath[path] = URL.createObjectURL(file);
+    }
+  }
   const dropzone = document.getElementById("dropzone");
   const project = currentProject();
   const alreadyAnalyzedPaths = new Set((project ? activeMedia(project) : []).map((item) => item.filePath));
@@ -2247,6 +2355,7 @@ function initializeIntakeApp(): void {
   const inboxDecision = document.getElementById("inboxDecisionFilter") as HTMLSelectElement | null;
   const batchAccept = document.getElementById("batchAcceptBtn") as HTMLButtonElement | null;
   const batchReject = document.getElementById("batchRejectBtn") as HTMLButtonElement | null;
+  const toggleInboxDetailsBtn = document.getElementById("toggleInboxDetailsBtn") as HTMLButtonElement | null;
   const workspaceNav = document.getElementById("workspaceNav");
   const photoGrid = document.getElementById("photoGrid");
   const photoDetail = document.getElementById("photoDetail");
@@ -2300,6 +2409,7 @@ function initializeIntakeApp(): void {
     !inboxDecision ||
     !batchAccept ||
     !batchReject ||
+    !toggleInboxDetailsBtn ||
     !workspaceNav ||
     !photoGrid ||
     !photoDetail ||
@@ -2522,6 +2632,7 @@ function initializeIntakeApp(): void {
 
   batchAccept.addEventListener("click", () => applyBatchInboxDecision("accept"));
   batchReject.addEventListener("click", () => applyBatchInboxDecision("reject"));
+  toggleInboxDetailsBtn.addEventListener("click", () => toggleInboxDetails());
 
   walkthroughMode.addEventListener("change", () => {
     state.transcriptionMode = walkthroughMode.value;
@@ -2668,6 +2779,7 @@ function initializeIntakeApp(): void {
       message: "Tour links updated"
     }));
     renderTourWorkspace();
+    renderAssetPanels();
     renderProjectDashboard();
   });
 
@@ -2753,6 +2865,23 @@ function initializeIntakeApp(): void {
     if (photo) {
       openImagePreview(photo);
     }
+  });
+
+  const floorPlanGallery = document.getElementById("floorPlanGallery");
+  floorPlanGallery?.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const path = target.getAttribute("data-path");
+    if (!path || !target.classList.contains("floor-plan-preview")) {
+      return;
+    }
+    const photo = photoByPath(path);
+    if (!photo) {
+      return;
+    }
+    openImagePreview(photo);
   });
 
   let dragPath: string | null = null;
@@ -2890,6 +3019,7 @@ function initializeIntakeApp(): void {
   renderProjectDashboard();
   renderProjectStatus();
   renderInbox();
+  renderFloorPlanWorkspace();
   renderTourWorkspace();
   setWorkspaceView(state.currentView);
   if (state.projects.length > 0) {

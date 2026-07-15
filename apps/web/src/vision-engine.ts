@@ -180,6 +180,18 @@ function rankSceneCandidates(candidates: Array<{ label: SceneTag; confidence: nu
   const primary = ordered[0] ?? { label: "miscellaneous" as SceneTag, confidence: 0.52 };
   const alternatives = ordered.filter((item) => item.label !== primary.label).slice(0, 3);
 
+  const secondary = ordered[1];
+  const confidenceGap = secondary ? primary.confidence - secondary.confidence : primary.confidence;
+  const lowConfidence = primary.confidence < 0.64 || (primary.confidence < 0.72 && confidenceGap < 0.06);
+
+  if (lowConfidence) {
+    return {
+      label: "miscellaneous",
+      confidence: Number(Math.max(0.35, Math.min(primary.confidence, 0.62)).toFixed(2)),
+      alternatives: ordered.slice(0, 3)
+    };
+  }
+
   return {
     label: primary.label,
     confidence: primary.confidence,
@@ -205,28 +217,31 @@ function detectScene(signals: VisionPhotoSignals): SceneDetection {
   }
 
   if (signals.greenRatio > 0.36 && landscape) {
-    candidates.push(candidate("patio-deck", 0.73));
+    candidates.push(candidate("patio-deck", 0.68));
   }
-  if (signals.blueRatio > 0.28 && signals.greenRatio > 0.2 && signals.brightness > 0.52 && landscape) {
+  if (signals.blueRatio > 0.28 && signals.greenRatio >= 0.2 && signals.brightness > 0.52 && landscape) {
     candidates.push(candidate("exterior-front", 0.74));
   }
   if (signals.greenRatio > 0.3 && signals.brightness > 0.48 && signals.contrast < 0.12 && landscape) {
     candidates.push(candidate("exterior-side", 0.69));
   }
-  if (signals.warmRatio > 0.34 && signals.edgeDensity > 0.11 && signals.brightness > 0.42) {
-    candidates.push(candidate("kitchen", 0.69));
+  if (signals.warmRatio > 0.36 && signals.edgeDensity > 0.13 && signals.brightness > 0.46 && signals.greenRatio < 0.26) {
+    candidates.push(candidate("kitchen", 0.67));
   }
-  if (signals.saturation < 0.2 && signals.brightness > 0.52 && signals.contrast > 0.08) {
-    candidates.push(candidate("bathroom", 0.67));
+  if (signals.saturation < 0.2 && signals.brightness > 0.52 && signals.contrast > 0.08 && signals.edgeDensity > 0.1) {
+    candidates.push(candidate("bathroom", 0.68));
   }
   if (signals.saturation < 0.17 && signals.brightness > 0.55 && signals.contrast > 0.1) {
     candidates.push(candidate("primary-bathroom", 0.64));
   }
+  if (signals.edgeDensity > 0.09 && signals.contrast > 0.09 && signals.brightness > 0.44 && signals.warmRatio < 0.35) {
+    candidates.push(candidate("living-room", 0.66));
+  }
   if (signals.darkPixelRatio > 0.22 && signals.edgeDensity < 0.12 && signals.brightness < 0.5) {
     candidates.push(candidate("primary-bedroom", 0.65));
   }
-  if (signals.edgeDensity > 0.08) {
-    candidates.push(candidate("living-room", 0.6));
+  if (signals.edgeDensity > 0.08 && signals.contrast > 0.06) {
+    candidates.push(candidate("living-room", 0.58));
   }
 
   return rankSceneCandidates(candidates);
@@ -268,10 +283,24 @@ function marketing(scene: SceneDetection, q: PhotoQualityAnalysis): MarketingAna
     q.composition * 0.16 +
     q.horizonLevel * 0.1;
 
-  const sceneBoost =
-    scene.label === "exterior-front" || scene.label === "living-room" || scene.label === "kitchen" ? 8 : scene.label === "aerial" ? 6 : 0;
+  const curbAppealBoost = scene.label === "exterior-front" ? 10 : scene.label === "aerial" ? 7 : 0;
+  const emotionalImpactBoost = scene.label === "living-room" || scene.label === "kitchen" ? 6 : scene.label === "patio-deck" ? 4 : 0;
+  const perceivedValueBoost =
+    scene.label === "exterior-front" || scene.label === "kitchen" || scene.label === "primary-bathroom" ? 5 : scene.label === "living-room" ? 4 : 0;
+  const sideElevationPenalty = scene.label === "exterior-side" ? -14 : 0;
+  const symmetryScore = clamp((q.horizonLevel + q.verticalCorrection + q.lensDistortion) / 3);
+  const uniquenessProxy = scene.label === "exterior-front" || scene.label === "aerial" || scene.label === "primary-bathroom" ? 5 : 1;
 
-  const hero = clamp(qualityBlend + sceneBoost + scene.confidence * 4);
+  const hero = clamp(
+    qualityBlend * 0.78 +
+      symmetryScore * 0.12 +
+      scene.confidence * 7 +
+      curbAppealBoost +
+      emotionalImpactBoost +
+      perceivedValueBoost +
+      uniquenessProxy +
+      sideElevationPenalty
+  );
 
   return {
     heroImageScore: hero,

@@ -1,6 +1,5 @@
 import {
   runDirectorVisionEngineV1,
-  SCENE_TAGS,
   type Recommendation,
   type SceneTag as VisionSceneTag,
   type VisionAnalysis
@@ -398,7 +397,28 @@ function decisionFromRecommendation(recommendation: Recommendation): DecisionTag
 }
 
 function compareForMlsOrder(a: PhotoAssessment, b: PhotoAssessment): number {
-  const scenePriority = new Map<SceneTag, number>(SCENE_TAGS.map((tag, index) => [tag, index]));
+  const scenePriority = new Map<SceneTag, number>([
+    ["exterior-front", 0],
+    ["aerial", 1],
+    ["living-room", 2],
+    ["kitchen", 3],
+    ["dining", 4],
+    ["family-room", 5],
+    ["primary-bedroom", 6],
+    ["primary-bathroom", 7],
+    ["secondary-bedroom", 8],
+    ["bathroom", 9],
+    ["office", 10],
+    ["laundry", 11],
+    ["basement", 12],
+    ["garage", 13],
+    ["patio-deck", 14],
+    ["pool", 15],
+    ["community-amenities", 16],
+    ["exterior-rear", 17],
+    ["exterior-side", 18],
+    ["miscellaneous", 19]
+  ]);
 
   const decisionWeight = (value: DecisionTag) => {
     if (value === "recommended") {
@@ -421,6 +441,77 @@ function compareForMlsOrder(a: PhotoAssessment, b: PhotoAssessment): number {
   }
 
   return b.heroScore - a.heroScore;
+}
+
+function narrativeSequence(photos: PhotoAssessment[]): PhotoAssessment[] {
+  const scenePriority = new Map<SceneTag, number>([
+    ["exterior-front", 0],
+    ["aerial", 1],
+    ["living-room", 2],
+    ["kitchen", 3],
+    ["dining", 4],
+    ["family-room", 5],
+    ["primary-bedroom", 6],
+    ["primary-bathroom", 7],
+    ["secondary-bedroom", 8],
+    ["bathroom", 9],
+    ["office", 10],
+    ["laundry", 11],
+    ["basement", 12],
+    ["garage", 13],
+    ["patio-deck", 14],
+    ["pool", 15],
+    ["community-amenities", 16],
+    ["exterior-rear", 17],
+    ["exterior-side", 18],
+    ["miscellaneous", 19]
+  ]);
+
+  const remaining = [...photos];
+  const ordered: PhotoAssessment[] = [];
+  let previousScene: SceneTag | null = null;
+
+  while (remaining.length > 0) {
+    let bestIndex = 0;
+    let bestScore = -Infinity;
+
+    for (let index = 0; index < remaining.length; index += 1) {
+      const candidate = remaining[index];
+      if (!candidate) {
+        continue;
+      }
+
+      const sceneRank = scenePriority.get(candidate.sceneTag) ?? 99;
+      const decisionScore = candidate.decision === "recommended" ? 28 : candidate.decision === "needs-work" ? 12 : -20;
+      const repetitionPenalty = previousScene && previousScene === candidate.sceneTag ? 38 : 0;
+      const openingBoost =
+        ordered.length === 0 && (candidate.sceneTag === "exterior-front" || candidate.sceneTag === "aerial") ? 22 : 0;
+      const sidePenalty = candidate.sceneTag === "exterior-side" ? 14 : 0;
+
+      const total =
+        decisionScore +
+        candidate.heroScore * 0.9 +
+        candidate.vision.marketing.clickLikelihood * 0.35 +
+        (100 - sceneRank * 4) +
+        openingBoost -
+        repetitionPenalty -
+        sidePenalty;
+
+      if (total > bestScore) {
+        bestScore = total;
+        bestIndex = index;
+      }
+    }
+
+    const [selected] = remaining.splice(bestIndex, 1);
+    if (!selected) {
+      break;
+    }
+    ordered.push(selected);
+    previousScene = selected.sceneTag;
+  }
+
+  return ordered;
 }
 
 function computeGroups(photos: PhotoAssessment[]): { duplicates: number[][]; similars: number[][] } {
@@ -565,7 +656,7 @@ export function assessPhotos(metrics: PhotoMetrics[]): PhotoAssessment[] {
     });
   });
 
-  const ordered = [...initial].sort(compareForMlsOrder);
+  const ordered = narrativeSequence([...initial].sort(compareForMlsOrder));
   ordered.forEach((item, index) => {
     item.recommendedMlsOrder = index + 1;
   });
@@ -644,7 +735,17 @@ function topHeroCandidates(photos: PhotoAssessment[]): PhotoAssessment[] {
   const keepers = photos.filter((item) => item.decision !== "remove");
   const preferred = keepers.filter((item) => item.sceneTag !== "exterior-side");
   const source = preferred.length > 0 ? preferred : keepers;
-  return source.sort((a, b) => b.heroScore - a.heroScore).slice(0, 5);
+  return source
+    .sort((a, b) => {
+      const sidePenaltyA = a.sceneTag === "exterior-side" ? 14 : 0;
+      const sidePenaltyB = b.sceneTag === "exterior-side" ? 14 : 0;
+      const uniquenessA = (a.duplicateGroupId ? -12 : 0) + (a.similarGroupId ? -6 : 4);
+      const uniquenessB = (b.duplicateGroupId ? -12 : 0) + (b.similarGroupId ? -6 : 4);
+      const scoreA = a.heroScore * 0.7 + a.vision.marketing.emotionalImpact * 0.2 + a.vision.marketing.clickLikelihood * 0.2 + uniquenessA - sidePenaltyA;
+      const scoreB = b.heroScore * 0.7 + b.vision.marketing.emotionalImpact * 0.2 + b.vision.marketing.clickLikelihood * 0.2 + uniquenessB - sidePenaltyB;
+      return scoreB - scoreA;
+    })
+    .slice(0, 5);
 }
 
 function buildExecutiveSummary(summary: IntakeSummary): ExecutiveSummary {
